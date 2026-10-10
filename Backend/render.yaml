@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: sarguardian-catalog-api
+    runtime: python
+    plan: free
+    rootDir: api_service
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_ORIGINS
+        sync: false
+      - key: MAX_TIME_WINDOW_DAYS
+        value: "90"
+      - key: MAX_AOI_AREA_KM2
+        value: "250"
+      - key: MAX_VERTICES
+        value: "25"
+      - key: MAX_GRANULES_PER_SEARCH
+        value: "50"

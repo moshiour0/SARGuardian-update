@@ -1,0 +1,1138 @@
+<meta charset="utf-8">
+<title>Run The Analysis Yourself</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+:root{
+  --night:#070c0f; --deep:#0c141a; --panel:#111d24; --panel2:#16242d; --edge:#1f313b;
+  --snow:#eef5f7; --mid:#9fb3bc; --dim:#6b8189;
+  --live:#5ad2e0; --pre:#ffab4d; --alarm:#ff6b5e; --go:#5fd39a;
+}
+:root[data-theme="light"]{
+  --night:#eef2f4; --deep:#ffffff; --panel:#ffffff; --panel2:#f2f6f7; --edge:#d4dee3;
+  --snow:#0b1317; --mid:#42545c; --dim:#66787f;
+  --live:#0b6f7d; --pre:#a2620f; --alarm:#b5302a; --go:#2b7d51;
+}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){
+  --night:#eef2f4; --deep:#ffffff; --panel:#ffffff; --panel2:#f2f6f7; --edge:#d4dee3;
+  --snow:#0b1317; --mid:#42545c; --dim:#66787f;
+  --live:#0b6f7d; --pre:#a2620f; --alarm:#b5302a; --go:#2b7d51;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--night);color:var(--snow);
+  font-family:Archivo,"Helvetica Neue",Arial,sans-serif;font-size:16px;line-height:1.6;
+  -webkit-font-smoothing:antialiased}
+.mono,code{font-family:"JetBrains Mono",ui-monospace,Menlo,monospace;font-variant-numeric:tabular-nums}
+h1,h2,.disp{font-family:"Instrument Serif",Georgia,serif;font-weight:400;letter-spacing:-.01em}
+h1{font-size:clamp(38px,6.6vw,74px);line-height:.98;margin:0 0 20px;text-wrap:balance}
+h2{font-size:clamp(26px,3.7vw,42px);line-height:1.06;margin:0 0 12px;text-wrap:balance}
+h3{font-size:15px;font-weight:600;margin:0 0 6px}
+p{margin:0 0 14px;color:var(--mid)}
+b,strong{color:var(--snow);font-weight:600}
+em{font-style:italic;color:var(--snow)}
+a{color:var(--live)}
+
+.shell{display:grid;grid-template-columns:238px minmax(0,1fr);min-height:100vh}
+.rail{border-right:1px solid var(--edge);background:var(--deep);position:sticky;top:0;
+  height:100vh;overflow-y:auto;padding:22px 16px}
+.stage{padding:0 30px 90px;max-width:940px}
+@media (max-width:900px){
+  .shell{grid-template-columns:1fr}
+  .rail{position:sticky;top:0;height:auto;border-right:0;border-bottom:1px solid var(--edge);
+    padding:10px 12px;z-index:40;display:flex;gap:7px;overflow-x:auto;align-items:center}
+  .rail .brand,.rail .railsub,.rail .speed,.rail .railnote{display:none}
+  .stage{padding:0 18px 70px}
+}
+.brand{font-family:"Instrument Serif",serif;font-size:20px;margin:0 0 4px}
+.railsub{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--dim);margin:0 0 18px}
+.step{display:flex;gap:10px;align-items:flex-start;padding:9px 10px;border-radius:9px;
+  cursor:pointer;border:1px solid transparent;margin-bottom:3px;white-space:nowrap}
+.step:hover{background:var(--panel)}
+.step.on{background:var(--panel);border-color:var(--edge)}
+.step .num{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:700;
+  width:20px;height:20px;flex:0 0 20px;border-radius:50%;border:1px solid var(--edge);
+  color:var(--dim);display:flex;align-items:center;justify-content:center;margin-top:1px}
+.step.on .num{border-color:var(--live);color:var(--live)}
+.step.done .num{background:var(--go);border-color:var(--go);color:var(--night)}
+.step .t{font-size:12.5px;line-height:1.3;color:var(--mid)}
+.step.on .t{color:var(--snow);font-weight:600}
+.speed{margin-top:16px;padding-top:14px;border-top:1px solid var(--edge)}
+.speed .lbl{font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--dim);margin-bottom:7px}
+.railnote{margin-top:14px;padding-top:12px;border-top:1px solid var(--edge);
+  font-family:"JetBrains Mono",monospace;font-size:10px;color:var(--dim);line-height:1.7}
+
+.station{padding:52px 0;border-bottom:1px solid var(--edge);scroll-margin-top:20px}
+.station:last-of-type{border-bottom:0}
+/* Stations are never disabled. Dimming says "not visited yet"; it must never
+   stop anyone poking at something out of order, which is how the aspect dial
+   ended up unusable for every first-time visitor. */
+.station.pending{opacity:.62}
+.station.pending:hover,.station.pending:focus-within{opacity:1}
+.eyebrow{display:flex;align-items:center;gap:10px;margin:0 0 14px;flex-wrap:wrap}
+.eyebrow .n{font-family:"JetBrains Mono",monospace;font-size:11px;font-weight:700;
+  letter-spacing:.18em;text-transform:uppercase;color:var(--dim)}
+.badge{font-family:"JetBrains Mono",monospace;font-size:9.5px;font-weight:700;letter-spacing:.13em;
+  padding:3px 8px;border-radius:20px;border:1px solid}
+.badge.live{color:var(--live);border-color:var(--live)}
+.badge.pre{color:var(--pre);border-color:var(--pre)}
+.lead{font-size:17.5px;line-height:1.5;color:var(--snow);max-width:665px}
+.body{max-width:665px}
+
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:13px;padding:20px;margin:22px 0 0}
+.panel.pad0{padding:0;overflow:hidden}
+.ctl{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:0 0 16px}
+.btn{font-family:Archivo,sans-serif;font-size:14px;font-weight:600;padding:10px 20px;border-radius:9px;
+  border:1px solid var(--live);background:var(--live);color:var(--night);cursor:pointer}
+.btn:hover{filter:brightness(1.12)}
+.btn:disabled{opacity:.45;cursor:progress}
+.btn.ghost{background:transparent;color:var(--live)}
+.btn.warn{border-color:var(--alarm);background:var(--alarm);color:#fff}
+.btn.warn.ghost{background:transparent;color:var(--alarm)}
+.btn.sm{font-size:12px;padding:7px 12px;font-family:"JetBrains Mono",monospace}
+label.fld{font-family:"JetBrains Mono",monospace;font-size:11.5px;color:var(--dim);
+  display:flex;flex-direction:column;gap:5px}
+label.fld .val{color:var(--snow);font-size:14px;font-weight:700}
+input[type=range]{accent-color:var(--live);width:200px}
+input[type=text]{font-family:"JetBrains Mono",monospace;font-size:12.5px;padding:8px 10px;
+  background:var(--night);border:1px solid var(--edge);color:var(--snow);border-radius:7px;width:190px}
+.seg{display:inline-flex;border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+.seg button{font-family:"JetBrains Mono",monospace;font-size:11.5px;padding:7px 13px;
+  background:transparent;color:var(--mid);border:0;cursor:pointer}
+.seg button.on{background:var(--live);color:var(--night);font-weight:700}
+.seg.sm button{font-size:10.5px;padding:5px 9px}
+.chk{display:flex;align-items:center;gap:8px;font-family:"JetBrains Mono",monospace;
+  font-size:11.5px;color:var(--mid);cursor:pointer}
+.chk input{accent-color:var(--live);width:15px;height:15px}
+
+canvas{display:block;max-width:100%;border-radius:8px;background:var(--night)}
+#s3canvas{cursor:crosshair}
+.cvwrap{overflow-x:auto}
+
+/* ---- the process console: this is where the work is shown ---- */
+.proc{font-family:"JetBrains Mono",monospace;font-size:12px;line-height:1.72;
+  background:#05090b;border:1px solid var(--edge);border-radius:10px;padding:14px 16px;
+  margin:16px 0 0;min-height:120px;max-height:340px;overflow-y:auto;white-space:pre-wrap}
+:root[data-theme="light"] .proc{background:#0a1114}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]) .proc{background:#0a1114}}
+.proc{color:#9fb3bc}
+.proc .cmd{color:#eef5f7;font-weight:700}
+.proc .cmd::before{content:"$ ";color:#5ad2e0}
+.proc .ok{color:#5fd39a} .proc .no{color:#ff6b5e} .proc .hl{color:#5ad2e0}
+.proc .warn{color:#ffab4d} .proc .dim{color:#4d5f66}
+.proc .q{color:#ffab4d;font-weight:700}
+.proc.running::after{content:"▋";color:#5ad2e0;animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(134px,1fr));gap:10px;margin:16px 0 0}
+.ro{background:var(--panel2);border:1px solid var(--edge);border-radius:9px;padding:12px 13px}
+.ro .k{font-family:"JetBrains Mono",monospace;font-size:9.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--dim);margin-bottom:6px}
+.ro .v{font-family:"JetBrains Mono",monospace;font-size:20px;font-weight:700;color:var(--snow);line-height:1.1}
+.ro.good .v{color:var(--go)} .ro.bad .v{color:var(--alarm)} .ro.hi .v{color:var(--live)}
+
+.insight{border-left:3px solid var(--live);background:var(--panel2);border-radius:0 10px 10px 0;
+  padding:15px 18px;margin:20px 0 0;max-width:690px}
+.insight.warn{border-left-color:var(--alarm)}
+.insight h3{color:var(--live)} .insight.warn h3{color:var(--alarm)}
+.insight p{margin:0;font-size:14.5px} .insight p+p{margin-top:9px}
+
+.next{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:24px 0 0;padding:15px 18px;
+  background:var(--panel2);border:1px solid var(--edge);border-radius:11px;max-width:690px}
+.next .lbl{font-family:"JetBrains Mono",monospace;font-size:10.5px;letter-spacing:.13em;
+  text-transform:uppercase;color:var(--dim)}
+.next .txt{flex:1;min-width:210px;font-size:14.5px;color:var(--mid)}
+.next .txt b{color:var(--snow)}
+
+table{width:100%;border-collapse:collapse;font-size:13.5px}
+th{font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:700;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--dim);text-align:left;padding:10px 13px;border-bottom:1px solid var(--edge)}
+td{padding:9px 13px;border-bottom:1px solid var(--edge);color:var(--mid)}
+tr:last-child td{border-bottom:0}
+tr.pick{cursor:pointer} tr.pick:hover td{background:var(--panel2)}
+td.k{color:var(--snow);font-family:"JetBrains Mono",monospace;font-size:12.5px;white-space:nowrap}
+td.n{font-family:"JetBrains Mono",monospace;text-align:right;white-space:nowrap}
+tr.dropped td{opacity:.3;text-decoration:line-through}
+tr.keep td.k{color:var(--go)}
+
+.verdict{font-family:"Instrument Serif",serif;font-size:clamp(24px,3.4vw,38px);line-height:1.15;
+  color:var(--snow);margin:26px 0 0;padding-top:22px;border-top:1px solid var(--edge)}
+.verdict span{color:var(--alarm)}
+.hero{padding:72px 0 20px}
+.toll{display:flex;flex-wrap:wrap;gap:30px;margin:28px 0 0;padding-top:22px;border-top:1px solid var(--edge)}
+.toll .n{font-family:"JetBrains Mono",monospace;font-size:27px;font-weight:700;line-height:1}
+.toll .l{font-family:"JetBrains Mono",monospace;font-size:10px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--dim);margin-top:7px}
+footer{padding:34px 0 0;border-top:1px solid var(--edge);margin-top:40px;
+  font-family:"JetBrains Mono",monospace;font-size:11px;color:var(--dim);line-height:1.8}
+@media (prefers-reduced-motion:reduce){.proc.running::after{animation:none}}
+</style>
+
+<div class="shell">
+  <nav class="rail">
+    <div class="brand">SARGuardian</div>
+    <div class="railsub">Run it yourself</div>
+    <div id="steps"></div>
+    <div class="speed">
+      <div class="lbl">Machine speed</div>
+      <div class="seg sm" id="speedseg">
+        <button data-s="2">Slow</button><button class="on" data-s="1">Normal</button><button data-s="0">Instant</button>
+      </div>
+    </div>
+    <div class="railnote">Every station is open from the start.<br>Poke at them in any order.</div>
+  </nav>
+
+  <main class="stage">
+
+  <section class="station" id="st1">
+    <div class="hero">
+      <div class="eyebrow"><span class="n">Station 1 of 8</span></div>
+      <h1>You have sixteen<br>radar images of<br>a mountain that<br>killed a thousand<br>people.</h1>
+      <p class="lead">On 26 August 2026 a rock and ice face broke off Langtang Lirung at about 5,000 m, fell more than a kilometre, dammed a river and burst it. The wave travelled 22 km in seven minutes.</p>
+      <p class="lead" style="margin-top:14px">NISAR was watching that slope for nine months. <b>Could it have seen this coming?</b></p>
+      <div class="toll">
+        <div><div class="n">1,000+</div><div class="l">killed</div></div>
+        <div><div class="n">1,200 m</div><div class="l">of fall</div></div>
+        <div><div class="n">22 km</div><div class="l">in 7 minutes</div></div>
+        <div><div class="n">16</div><div class="l">radar images</div></div>
+      </div>
+      <div class="insight">
+        <h3>Nothing here is locked and nothing is pre-rendered</h3>
+        <p>Eight stations, each a real step. Your browser does the arithmetic on the real measurements, and each station prints its working as it goes — the commands, the intermediate numbers, the dead ends.</p>
+        <p>Skip around, change the inputs, break things. Steps needing the 51 GB archive are marked <span class="badge pre">PRE-COMPUTED</span>; everything else is <span class="badge live">LIVE</span>. If the pacing annoys you, set the machine to <b>Instant</b> in the sidebar.</p>
+      </div>
+      <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Find the imagery.</b> The obvious way to pick satellite images is a trap, and we fell into it.</span><button class="btn" data-go="2">Begin →</button></div>
+    </div>
+  </section>
+
+  <section class="station pending" id="st2">
+    <div class="eyebrow"><span class="n">Station 2</span><span class="badge live">LIVE</span></div>
+    <h2>Find the imagery</h2>
+    <p class="lead">67 Sentinel-2 scenes cross this mountain in the monsoon. You need the clearest one before the collapse, and anything usable after.</p>
+    <div class="panel">
+      <div class="ctl">
+        <button class="btn" id="s2run">Search the catalogue</button>
+        <label class="fld">MAX CLOUD <span class="val" id="s2v">40%</span>
+          <input type="range" id="s2slider" min="0" max="100" value="40"></label>
+        <div class="seg" id="s2mode">
+          <button class="on" data-m="tile">score by TILE</button><button data-m="aoi">score by OUR SLOPE</button>
+        </div>
+      </div>
+      <div class="proc" id="p2">Press <b>Search the catalogue</b> to begin.</div>
+      <div class="cvwrap"><canvas id="s2canvas" width="1720" height="250" style="width:860px"></canvas></div>
+      <div class="readout">
+        <div class="ro"><div class="k">Scenes kept</div><div class="v" id="s2keep">–</div></div>
+        <div class="ro"><div class="k">Usable before</div><div class="v" id="s2pre">–</div></div>
+        <div class="ro"><div class="k">Usable after</div><div class="v" id="s2post">–</div></div>
+        <div class="ro hi"><div class="k">Clearest in the run-up</div><div class="v" id="s2best">–</div></div>
+      </div>
+    </div>
+    <div class="insight warn" id="s2insight" style="display:none"><h3>That is the trap</h3><p id="s2itext"></p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Find where it broke.</b> Compare the images and let the change find itself.</span><button class="btn" data-go="3">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st3">
+    <div class="eyebrow"><span class="n">Station 3</span><span class="badge live">LIVE</span></div>
+    <h2>Find where it broke</h2>
+    <p class="lead">Snow is bright in visible light and nearly black in shortwave infrared; rock is not. One index tells them apart — and a collapse strips snow off rock.</p>
+    <p class="body">275,000 real cells, 20 m each. Set a threshold, run it, then <b>click any red cluster on the map</b> to interrogate it.</p>
+    <div class="panel">
+      <div class="ctl">
+        <label class="fld">SNOW LOST, AT LEAST <span class="val" id="s3v">0.25</span>
+          <input type="range" id="s3slider" min="10" max="60" value="25"></label>
+        <label class="chk"><input type="checkbox" id="s3snow" checked> must have been snow before</label>
+        <button class="btn" id="s3run">Run change detection</button>
+      </div>
+      <div class="proc" id="p3">Press <b>Run change detection</b>.</div>
+      <div class="cvwrap"><canvas id="s3canvas" width="914" height="1204" style="width:500px"></canvas></div>
+      <div class="readout">
+        <div class="ro"><div class="k">Comparable</div><div class="v" id="s3cmp">–</div></div>
+        <div class="ro"><div class="k">Cells flagged</div><div class="v" id="s3flag">–</div></div>
+        <div class="ro bad"><div class="k">Clusters</div><div class="v" id="s3clu">–</div></div>
+        <div class="ro"><div class="k">Largest</div><div class="v" id="s3big">–</div></div>
+      </div>
+    </div>
+    <div class="insight warn" id="s3insight" style="display:none"><h3>So which one is the scar?</h3>
+      <p>The index says a surface <em>stopped being snow</em>. It cannot say what replaced it — bedrock, mud, or debris dumped <em>onto</em> clean snow all read identically. And the window spans 27 days, so ordinary melt is inside it.</p>
+      <p><b>Three causes, one signature.</b> You need something the index does not have.</p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Use the terrain.</b> Debris rests on flat ground; melt prefers the sunny side; a detachment is steep, high and neither.</span><button class="btn" data-go="4">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st4">
+    <div class="eyebrow"><span class="n">Station 4</span><span class="badge pre">PRE-COMPUTED TERRAIN</span></div>
+    <h2>Narrow it down</h2>
+    <p class="lead">The browser cannot query an elevation model, so each cluster's slope, height and facing are carried in. What you do with them is yours.</p>
+    <div class="panel pad0">
+      <div style="padding:18px 20px 0">
+        <div class="ctl">
+          <label class="chk"><input type="checkbox" class="s4f" data-f="slope"> steep — 28°+</label>
+          <label class="chk"><input type="checkbox" class="s4f" data-f="elev"> high — above 5,000 m</label>
+          <label class="chk"><input type="checkbox" class="s4f" data-f="north"> facing north, not the sun</label>
+        </div>
+      </div>
+      <table id="s4tbl"><thead><tr><th>#</th><th class="n">km²</th><th class="n">Height</th><th class="n">Slope</th><th class="n">Faces</th><th>Reading</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="readout">
+      <div class="ro bad"><div class="k">Candidates left</div><div class="v" id="s4left">–</div></div>
+      <div class="ro"><div class="k">Facing range</div><div class="v" id="s4asp">–</div></div>
+      <div class="ro good"><div class="k">All face</div><div class="v" id="s4dir">–</div></div>
+    </div>
+    <div class="panel">
+      <h3 style="font-size:15px">Interrogate any coordinate you like</h3>
+      <p class="body" style="font-size:14px;margin-bottom:12px">The reports named one. Test it — or type your own and see what the imagery says.</p>
+      <div class="ctl">
+        <input type="text" id="s4lat" value="28.28771"><input type="text" id="s4lon" value="85.52809">
+        <button class="btn ghost warn" id="s4probebtn">Probe it</button>
+        <button class="btn sm ghost" data-probe="28.27802,85.52963">a candidate</button>
+      </div>
+      <div class="proc" id="p4" style="display:none"></div>
+    </div>
+    <div class="insight" id="s4insight" style="display:none"><h3>Four candidates, and they all face north</h3><p id="s4itext"></p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Measure what the radar could see.</b> Find the level below which motion is indistinguishable from noise.</span><button class="btn" data-go="5">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st5">
+    <div class="eyebrow"><span class="n">Station 5</span><span class="badge live">LIVE</span></div>
+    <h2>Measure the noise floor</h2>
+    <p class="lead">Nobody can tell you NISAR's floor on this hillside. You have to measure it, from the pixels.</p>
+    <p class="body">Pick any pair of radar images. Each dot is a real measured offset.</p>
+    <div class="panel">
+      <div class="ctl" id="s5pairs"></div>
+      <div class="proc" id="p5">Pick a pair above.</div>
+      <div class="cvwrap"><canvas id="s5canvas" width="1700" height="470" style="width:850px"></canvas></div>
+      <div class="readout">
+        <div class="ro"><div class="k">Pixels</div><div class="v" id="s5n">–</div></div>
+        <div class="ro"><div class="k">Median</div><div class="v" id="s5med">–</div></div>
+        <div class="ro"><div class="k">Robust σ</div><div class="v" id="s5sig">–</div></div>
+        <div class="ro bad"><div class="k">Floor, mm/day</div><div class="v" id="s5floor">–</div></div>
+      </div>
+    </div>
+    <div class="insight" id="s5insight" style="display:none"><h3>You just measured the floor</h3><p id="s5itext"></p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Check the radar was looking the right way.</b> A floor is worthless if the satellite cannot see the direction the slope moves.</span><button class="btn" data-go="6">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st6">
+    <div class="eyebrow"><span class="n">Station 6</span><span class="badge live">LIVE</span></div>
+    <h2>Which way is the slope facing?</h2>
+    <p class="lead">Radar measures motion towards or away from itself, nothing else. A slope sliding across the beam is invisible however fast it goes.</p>
+    <p class="body"><b>Drag the dial.</b> This is the single most consequential number in the analysis, and the original study assumed the wrong value.</p>
+    <div class="panel">
+      <div class="ctl">
+        <label class="fld">SLOPE FACES <span class="val" id="s6v">273° (west)</span>
+          <input type="range" id="s6slider" min="0" max="359" value="273"></label>
+        <button class="btn ghost sm" data-asp="273">what we assumed</button>
+        <button class="btn ghost sm" data-asp="342">what we measured</button>
+        <button class="btn ghost sm" data-asp="0">due north</button>
+      </div>
+      <div class="cvwrap"><canvas id="s6canvas" width="1700" height="620" style="width:850px"></canvas></div>
+      <div class="readout">
+        <div class="ro hi"><div class="k">NISAR ASC 098</div><div class="v" id="s6n98">–</div></div>
+        <div class="ro"><div class="k">NISAR DESC 048</div><div class="v" id="s6n48">–</div></div>
+        <div class="ro"><div class="k">Tracks that can see</div><div class="v" id="s6ok">–</div></div>
+        <div class="ro bad"><div class="k">Bound becomes</div><div class="v" id="s6bound">–</div></div>
+      </div>
+      <div class="proc" id="p6" style="min-height:0;max-height:150px"></div>
+    </div>
+    <div class="insight warn" id="s6insight" style="display:none"><h3>A factor of three, from one assumption</h3><p id="s6itext"></p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>Run the detector.</b> Point the alarm at nine months of real measurements.</span><button class="btn" data-go="7">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st7">
+    <div class="eyebrow"><span class="n">Station 7</span><span class="badge live">LIVE</span></div>
+    <h2>Run the alarm</h2>
+    <p class="lead">A failing slope speeds up. Plot one-over-speed against time and it falls in a straight line to zero — and where it crosses is the failure date. Mines have used this for forty years.</p>
+    <p class="body">Every velocity must clear its own pair's floor before it is allowed into the fit.</p>
+    <div class="panel">
+      <div class="ctl">
+        <button class="btn" id="s7run">Run detector</button>
+        <label class="chk"><input type="checkbox" id="s7cut" checked> refuse data from after the collapse</label>
+      </div>
+      <div class="proc" id="p7">Press <b>Run detector</b>.</div>
+      <div class="cvwrap"><canvas id="s7canvas" width="1700" height="520" style="width:850px"></canvas></div>
+      <div class="readout">
+        <div class="ro"><div class="k">Blocks</div><div class="v" id="s7blk">–</div></div>
+        <div class="ro"><div class="k">Velocities</div><div class="v" id="s7vel">–</div></div>
+        <div class="ro"><div class="k">Cleared floor</div><div class="v" id="s7pass">–</div></div>
+        <div class="ro" id="s7alarmro"><div class="k">Alarms</div><div class="v" id="s7alarm">–</div></div>
+      </div>
+    </div>
+    <div class="insight warn" id="s7insight" style="display:none"><h3 id="s7ititle"></h3><p id="s7itext"></p></div>
+    <div class="next"><span class="lbl">Suggested</span><span class="txt"><b>See what it adds up to.</b> Everything you measured, against what was actually happening.</span><button class="btn" data-go="8">Continue →</button></div>
+  </section>
+
+  <section class="station pending" id="st8">
+    <div class="eyebrow"><span class="n">Station 8</span><span class="badge live">YOUR NUMBERS</span></div>
+    <h2>What you just found</h2>
+    <p class="lead">Every figure below came out of the work you did, not from a table we wrote.</p>
+    <div class="panel">
+      <div class="readout">
+        <div class="ro"><div class="k">Your floor</div><div class="v" id="s8floor">–</div></div>
+        <div class="ro"><div class="k">Your geometry</div><div class="v" id="s8sens">–</div></div>
+        <div class="ro bad"><div class="k">Your bound</div><div class="v" id="s8bound">–</div></div>
+        <div class="ro"><div class="k">Your alarms</div><div class="v" id="s8alarm">–</div></div>
+      </div>
+      <div class="cvwrap" style="margin-top:20px"><canvas id="s8canvas" width="1700" height="330" style="width:850px"></canvas></div>
+      <p class="verdict" id="s8verdict">Work through the stations and your own numbers appear here.</p>
+    </div>
+    <div class="insight"><h3>The precursor was real — and somebody else measured it</h3>
+      <p>A separate study using Sentinel-1 found this slope creeping at about <b>0.33 mm a day</b> from January to August 2026, speeding up at the end. About the rate human hair grows.</p>
+      <p>So the conclusion is not "nothing happened". It is: <b>a signal existed and NISAR's feature tracking was roughly 30 to 100 times too coarse to resolve it</b> — line of sight against line of sight, from a 1 km average to a single pixel. Both this collapse and Blatten in 2025 were caught by wave-pattern interferometry. But at the candidate that matches the published elevation, NISAR's own interferograms hold <b>no valid pixel in any pair</b>: the fix is phase that survives on a steep north face, not just "use phase".</p>
+      <p>The winter products are NISAR's pre-calibration BETA release and the summer ones calibrated PROVISIONAL, and nothing was released for 20 January – 17 June 2026 — the months the creep was building. Some of what this shows is the archive, not the physics.</p></div>
+    <div class="insight warn"><h3>Four things we published and withdrew</h3>
+      <p><b>"Nothing was moving."</b> A floor describes your instrument, never the world.</p>
+      <p><b>"The scar is at this coordinate."</b> You found four candidates. We had reported one, to five decimals, because we pointed the search at it.</p>
+      <p><b>"Frequent passes cause false alarms."</b> An error in our own threshold. Corrected, the false-alarm rate is zero at every revisit tested.</p>
+      <p><b>"180 to 360 times too insensitive."</b> That divided a downslope bound by a line-of-sight rate, used one pixel against a slope average, and took its upper end from a candidate with no valid offsets at all.</p></div>
+    <footer>
+      SARGuardian · Langtang Lirung · 26 August 2026 · NASA Space Apps 2026<br>
+      Built on NASA NISAR L2 and Copernicus Sentinel-2. The precursor figure is someone else's measurement, cited.<br>
+      Half the mountain is never cloud-free after the collapse, so there may be candidates nobody can see. No ground survey exists to check any of this against.
+    </footer>
+  </section>
+
+  </main>
+</div>
+
+<script id="payload" type="application/json">{{DATA}}</script>
+<script>
+"use strict";
+const D=JSON.parse(document.getElementById('payload').textContent);
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const fmt=(x,n=1)=>Number(x).toFixed(n);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+/* ---- maths, mirrored from the Python ---- */
+const median=a=>{const s=[...a].sort((x,y)=>x-y),m=s.length>>1;
+  return s.length%2?s[m]:(s[m-1]+s[m])/2;};
+const robustSigma=a=>{const m=median(a);return 1.4826*median(a.map(v=>Math.abs(v-m)));};
+const detectionFloor=(a,span)=>span>0?3*robustSigma(a)/span:NaN;
+const rad=d=>d*Math.PI/180;
+const downslopeUnit=(sl,as)=>{const b=rad(sl),a=rad(as);
+  return [Math.sin(a)*Math.cos(b),Math.cos(a)*Math.cos(b),-Math.sin(b)];};
+const losUnit=(h,i,left)=>{const t=rad(i),H=rad(h),s=left?-1:1;
+  return [-s*Math.sin(t)*Math.cos(H),s*Math.sin(t)*Math.sin(H),Math.cos(t)];};
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const sensitivity=(tr,sl,as)=>dot(downslopeUnit(sl,as),losUnit(tr.heading,tr.incidence,tr.left_looking));
+
+/* ---- the process console ---- */
+const Proc={
+  mult:1,
+  el:null,
+  deadline:0,
+  // A whole station gets a time budget. Past it, or in a hidden tab, or on
+  // Instant, everything remaining prints at once.
+  //
+  // This is not a nicety. Browsers clamp setTimeout hard in background tabs -
+  // a 7 ms delay came back as 660 ms in testing - so a console paced purely by
+  // timers can stall halfway through and strand the reader with a half-typed
+  // word and no result. The budget makes the worst case "it printed fast",
+  // never "it stopped".
+  begin(id,budgetMs){
+    this.el=$(id); this.el.innerHTML=''; this.el.classList.add('running');
+    this.el.scrollTop=0;
+    this.deadline=performance.now()+(budgetMs||9000)*(this.mult||1);
+    return this;
+  },
+  end(){ if(this.el) this.el.classList.remove('running'); },
+  get rushing(){ return this.mult===0||document.hidden||performance.now()>this.deadline; },
+  async pause(ms){ if(this.rushing) return; await sleep(ms*this.mult); },
+  async raw(html,cls){
+    const d=document.createElement('div');
+    if(cls) d.className=cls;
+    d.innerHTML=html;
+    this.el.appendChild(d); this.el.scrollTop=this.el.scrollHeight;
+    await this.pause(34);
+  },
+  // Commands type out, because a command is the moment you watch a decision
+  // being made rather than a number arriving. Three characters a tick, so a
+  // long command costs a quarter of a second and not two.
+  async cmd(text){
+    const d=document.createElement('div'); d.className='cmd';
+    this.el.appendChild(d);
+    if(this.rushing){ d.textContent=text; }
+    else {
+      for(let i=0;i<text.length;i+=3){
+        d.textContent=text.slice(0,i+3);
+        if(this.rushing){ d.textContent=text; break; }
+        await sleep(9*this.mult);
+      }
+    }
+    this.el.scrollTop=this.el.scrollHeight;
+    await this.pause(80);
+  },
+  async line(t,c){ await this.raw(t,c); },
+  async gap(){ await this.raw('&nbsp;'); }
+};
+$$('#speedseg button').forEach(b=>b.onclick=()=>{
+  $$('#speedseg button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); Proc.mult=+b.dataset.s;
+});
+
+/* ---- tour state. Guidance only: nothing is ever disabled. ---- */
+const STEPS=[["The event",1],["Find the imagery",2],["Find where it broke",3],
+  ["Narrow it down",4],["Measure the floor",5],["Which way it faces",6],
+  ["Run the alarm",7],["What you found",8]];
+const T={at:1,done:new Set(),res:{}};
+let saving=false;
+try{const s=JSON.parse(localStorage.getItem('sg_lab2')||'{}');
+  if(s.done)T.done=new Set(s.done); if(s.res)T.res=s.res;}catch(e){}
+const save=()=>{try{localStorage.setItem('sg_lab2',JSON.stringify({done:[...T.done],res:T.res}));}catch(e){}
+  if(window.__paintS8&&!saving){saving=true;try{window.__paintS8();}finally{saving=false;}}};
+function paintRail(){$$('.step').forEach(el=>{const n=+el.dataset.n;
+  el.classList.toggle('on',n===T.at); el.classList.toggle('done',T.done.has(n));});}
+function complete(n){T.done.add(n);save();
+  const s=$('#st'+n); if(s)s.classList.remove('pending'); paintRail();}
+function go(n){T.at=n; const el=$('#st'+n);
+  if(el){el.classList.remove('pending'); el.scrollIntoView({behavior:'smooth',block:'start'});}
+  paintRail();}
+$('#steps').innerHTML=STEPS.map(([t,n])=>
+  `<div class="step" data-n="${n}"><div class="num">${n}</div><div class="t">${t}</div></div>`).join('');
+$$('.step').forEach(el=>el.onclick=()=>go(+el.dataset.n));
+$$('[data-go]').forEach(b=>b.onclick=()=>{const to=+b.dataset.go; if(to>1)complete(to-1); go(to);});
+
+/* ================= station 2 ================= */
+(function(){
+  const cv=$('#s2canvas'),cx=cv.getContext('2d');
+  const EV=new Date('2026-08-26'), NEAR=60*864e5;
+  const scenes=D.scenes.map(s=>({...s,d:new Date(s.date)}));
+  const t0=+new Date('2026-05-01'),t1=+new Date('2026-09-30');
+  let mode='tile',maxc=40,ran=false;
+
+  function draw(){
+    const W=cv.width,H=cv.height,c=getComputedStyle(document.documentElement);
+    const edge=c.getPropertyValue('--edge'),dim=c.getPropertyValue('--dim'),
+          live=c.getPropertyValue('--live'),alarm=c.getPropertyValue('--alarm');
+    cx.clearRect(0,0,W,H);
+    cx.strokeStyle=edge;cx.lineWidth=2;
+    cx.beginPath();cx.moveTo(58,H-46);cx.lineTo(W-28,H-46);cx.stroke();
+    const ex=58+(EV-t0)/(t1-t0)*(W-86);
+    cx.strokeStyle=alarm;cx.setLineDash([8,6]);
+    cx.beginPath();cx.moveTo(ex,20);cx.lineTo(ex,H-46);cx.stroke();cx.setLineDash([]);
+    cx.fillStyle=alarm;cx.font='700 21px "JetBrains Mono",monospace';cx.fillText('collapse',ex+10,38);
+    cx.fillStyle=dim;cx.font='19px "JetBrains Mono",monospace';
+    ['May','Jun','Jul','Aug','Sep'].forEach((m,i)=>{
+      const t=+new Date(2026,4+i,1);cx.fillText(m,58+(t-t0)/(t1-t0)*(W-86)-14,H-18);});
+    let kept=0,pre=0,post=0,best=null;
+    scenes.forEach(s=>{
+      const v=mode==='tile'?s.tile_cloud:s.aoi_cloud, ok=v<=maxc;
+      const x=58+(+s.d-t0)/(t1-t0)*(W-86), y=H-46-(100-v)/100*(H-110);
+      cx.beginPath();cx.arc(x,y,ok?9:5,0,7);
+      cx.fillStyle=ok?live:edge;cx.globalAlpha=ok?1:.5;cx.fill();cx.globalAlpha=1;
+      if(ok){kept++; if(+s.d<+EV){pre++; if(+EV-+s.d<=NEAR&&(!best||s.aoi_cloud<best.aoi_cloud))best=s;} else post++;}
+    });
+    $('#s2keep').textContent=kept;$('#s2pre').textContent=pre;$('#s2post').textContent=post;
+    $('#s2best').textContent=best?best.date.slice(5):'none';
+    return best;
+  }
+
+  async function run(){
+    $('#s2run').disabled=true;
+    const P=Proc.begin('#p2');
+    await P.cmd('stac search --collection sentinel-2-l2a --bbox 85.4645,28.2453,85.5562,28.3529');
+    await P.line(`  <span class="hl">${scenes.length}</span> scenes returned, 2026-05-01 .. 2026-09-30`);
+    await P.cmd('read eo:cloud_cover from each scene header');
+    const worst=scenes.filter(s=>s.tile_cloud>60).length;
+    await P.line(`  <span class="warn">${worst} of ${scenes.length}</span> are over 60% cloudy. It is the monsoon.`);
+    await P.gap();
+    await P.line('<span class="q">? that figure covers the whole 110 km tile.</span>');
+    await P.line('<span class="q">  our slope is 82 km2 — a fiftieth of it.</span>');
+    await P.gap();
+    await P.cmd('re-score: open SCL band, clip to the AOI ring, count cloud classes');
+    const show=scenes.filter(s=>+s.d<+EV&&+EV-+s.d<=NEAR).sort((a,b)=>a.aoi_cloud-b.aoi_cloud).slice(0,4);
+    for(const s of show){
+      const better=s.tile_cloud-s.aoi_cloud;
+      await P.line(`  ${s.date}   tile <span class="dim">${fmt(s.tile_cloud)}%</span>`
+        +`  →  AOI <span class="${s.aoi_cloud<10?'ok':''}">${fmt(s.aoi_cloud)}%</span>`
+        +(better>20?`   <span class="warn">${fmt(better)} points better than advertised</span>`:''));
+    }
+    await P.gap();
+    const b=show[0];
+    await P.line(`<span class="ok">✓</span> clearest in the run-up: <span class="hl">${b.date}</span>`
+      +` at <span class="ok">${fmt(b.aoi_cloud)}%</span> over the slope,`
+      +` <span class="dim">${fmt(b.tile_cloud)}% by the catalogue</span>`);
+    await P.line(`<span class="no">✗</span> ranking on the catalogue figure would have discarded it.`);
+    P.end();
+    $('#s2run').disabled=false; ran=true;
+    $('#s2itext').innerHTML=`The catalogue's cloud figure covers a <b>110 km tile</b>; our slope is a fiftieth of it. `+
+      `<b>${b.date}</b> is <b>${fmt(b.tile_cloud)}% cloudy as a tile</b> but <b>${fmt(b.aoi_cloud)}% over the mountain</b>. `+
+      `Every scene here was re-scored over the slope itself. Flip the toggle above and watch which images survive.`;
+    $('#s2insight').style.display='block';
+    complete(2);
+  }
+  $('#s2run').onclick=run;
+  $('#s2slider').oninput=e=>{maxc=+e.target.value;$('#s2v').textContent=maxc+'%';draw();};
+  $$('#s2mode button').forEach(b=>b.onclick=()=>{
+    $$('#s2mode button').forEach(x=>x.classList.remove('on'));
+    b.classList.add('on');mode=b.dataset.m;draw(); if(ran)complete(2);});
+  draw();
+})();
+
+/* ================= station 3 ================= */
+let GRID=null, LASTLAB=null, LASTSIZES=null;
+(function(){
+  const cv=$('#s3canvas'),cx=cv.getContext('2d');
+  const W=D.meta.grid.w,H=D.meta.grid.h;
+  const img=new Image();
+  img.onload=()=>{
+    const off=document.createElement('canvas');off.width=W;off.height=H;
+    const oc=off.getContext('2d');oc.drawImage(img,0,0);
+    const px=oc.getImageData(0,0,W,H).data;
+    const d=new Float32Array(W*H),pre=new Float32Array(W*H),both=new Uint8Array(W*H);
+    for(let i=0,j=0;i<W*H;i++,j+=4){d[i]=px[j]/127.5-1;pre[i]=px[j+1]/127.5-1;both[i]=px[j+2]>128?1:0;}
+    GRID={d,pre,both,W,H};
+    $('#s3cmp').textContent=D.meta.grid.usable_pct+'%';
+    paint();
+  };
+  img.src='data:image/png;base64,'+D.change_png;
+
+  function paint(flag){
+    const {d,both}=GRID,im=cx.createImageData(W,H),o=im.data;
+    for(let i=0,j=0;i<W*H;i++,j+=4){
+      if(!both[i]){o[j]=14;o[j+1]=20;o[j+2]=25;o[j+3]=255;continue;}
+      if(flag&&flag[i]){o[j]=255;o[j+1]=90;o[j+2]=70;o[j+3]=255;continue;}
+      const t=Math.max(-1,Math.min(1,d[i]));
+      if(t<0){const k=-t;o[j]=180+60*k;o[j+1]=150-90*k;o[j+2]=145-90*k;}
+      else{const k=t;o[j]=170-110*k;o[j+1]=200-40*k;o[j+2]=225;}
+      o[j+3]=255;
+    }
+    cx.putImageData(im,0,0);
+  }
+  $('#s3slider').oninput=e=>{$('#s3v').textContent=(-e.target.value/100).toFixed(2);};
+
+  $('#s3run').onclick=async()=>{
+    if(!GRID)return;
+    $('#s3run').disabled=true;
+    const thr=-$('#s3slider').value/100, needSnow=$('#s3snow').checked;
+    const {d,pre,both}=GRID,N=W*H;
+    const P=Proc.begin('#p3');
+    await P.cmd(`load change grid  ${W}x${H} = ${N.toLocaleString()} cells @ 20 m`);
+    await P.line(`  usable in BOTH epochs: <span class="hl">${D.meta.grid.usable_px.toLocaleString()}</span>`
+      +` (<span class="warn">${D.meta.grid.usable_pct}%</span> — cloud takes the rest)`);
+    await P.cmd(`threshold  dNDSI < ${thr.toFixed(2)}${needSnow?'  AND  pre-NDSI > 0.35':''}`);
+    const flag=new Uint8Array(N);let nflag=0;
+    for(let band=0;band<4;band++){
+      const lo=Math.floor(band*H/4),hi=Math.floor((band+1)*H/4);
+      for(let y=lo;y<hi;y++)for(let x=0;x<W;x++){const i=y*W+x;
+        if(both[i]&&d[i]<thr&&(!needSnow||pre[i]>0.35)){flag[i]=1;nflag++;}}
+      await P.line(`  rows ${String(lo).padStart(4)}–${String(hi).padStart(4)} ....... `
+        +`<span class="hl">${nflag.toLocaleString()}</span> flagged so far`);
+    }
+    paint(flag);
+    await P.cmd('connected components, 8-neighbour');
+    const lab=new Int32Array(N),st=new Int32Array(N);let k=0;const sizes=[];
+    for(let s=0;s<N;s++){
+      if(!flag[s]||lab[s])continue;
+      k++;let sp=0;st[sp++]=s;lab[s]=k;let n=0;
+      while(sp){const p=st[--sp];n++;const y=(p/W)|0,x=p-y*W;
+        for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+          const yy=y+dy,xx=x+dx;if(yy<0||yy>=H||xx<0||xx>=W)continue;
+          const q=yy*W+xx;if(flag[q]&&!lab[q]){lab[q]=k;st[sp++]=q;}}}
+      sizes.push({id:k,n});
+      if(n>=400) await P.line(`  cluster ${String(k).padStart(3)} ....... `
+        +`<span class="hl">${n.toLocaleString()}</span> px  = ${(n*400/1e6).toFixed(2)} km2`);
+    }
+    LASTLAB=lab; LASTSIZES=sizes;
+    const big=sizes.filter(s=>s.n>=40).sort((a,b)=>b.n-a.n);
+    await P.gap();
+    await P.line(`<span class="no">→ ${big.length} clusters</span> of 1.6 ha or more.`
+      +`  largest ${(big[0].n*400/1e6).toFixed(2)} km2, smallest ${(big[big.length-1].n*400/1e6).toFixed(2)} km2`);
+    await P.line(`<span class="q">? which one is the scar. the index cannot say.</span>`);
+    P.end();
+    $('#s3flag').textContent=nflag.toLocaleString();
+    $('#s3clu').textContent=big.length;
+    $('#s3big').textContent=(big[0].n*400/1e6).toFixed(2)+' km²';
+    $('#s3insight').style.display='block';
+    $('#s3run').disabled=false;
+    T.res.clusters=big.length;save();complete(3);
+  };
+
+  // Click any cluster to interrogate it - the exploration this page needs.
+  cv.onclick=async e=>{
+    if(!LASTLAB)return;
+    const r=cv.getBoundingClientRect();
+    const x=Math.floor((e.clientX-r.left)/r.width*W), y=Math.floor((e.clientY-r.top)/r.height*H);
+    let i=y*W+x; if(i<0||i>=W*H)return;
+    // Snap to the nearest flagged cell within three. A 20 m cell is under a
+    // pixel on screen, so an exact hit is luck; without this, clicking a
+    // cluster you can plainly see reports "no data" from the neighbour you
+    // actually hit.
+    if(!LASTLAB[i]){
+      let best=-1,bd=1e9;
+      for(let dy=-3;dy<=3;dy++)for(let dx=-3;dx<=3;dx++){
+        const yy=y+dy,xx=x+dx; if(yy<0||yy>=H||xx<0||xx>=W)continue;
+        const q=yy*W+xx; if(!LASTLAB[q])continue;
+        const d2=dx*dx+dy*dy; if(d2<bd){bd=d2;best=q;}
+      }
+      if(best>=0) i=best;
+    }
+    const id=LASTLAB[i];
+    const P=Proc.begin('#p3');
+    await P.cmd(`inspect cell (${x}, ${y})`);
+    if(!id){
+      await P.line(GRID.both[i]?`  not flagged. dNDSI here is <span class="hl">${fmt(GRID.d[i],3)}</span>`
+        +(GRID.d[i]>0?`  <span class="ok">— it gained snow</span>`:`  <span class="dim">— below the threshold</span>`)
+        :`  <span class="dim">no data: cloud in one epoch or both</span>`);
+      P.end();return;
+    }
+    const sz=LASTSIZES.find(s=>s.id===id);
+    await P.line(`  belongs to cluster <span class="hl">${id}</span>, `
+      +`<span class="hl">${sz.n.toLocaleString()}</span> px = ${(sz.n*400/1e6).toFixed(2)} km2`);
+    await P.line(`  dNDSI here <span class="no">${fmt(GRID.d[i],3)}</span>, `
+      +`was-snow index <span class="hl">${fmt(GRID.pre[i],2)}</span>`);
+    await P.line(`  <span class="dim">terrain is not in the browser — station 4 carries it</span>`);
+    P.end();
+  };
+})();
+
+/* ================= station 4 ================= */
+(function(){
+  const tb=$('#s4tbl tbody'),C=D.clusters;
+  function render(){
+    const f={slope:false,elev:false,north:false};
+    $$('.s4f').forEach(c=>f[c.dataset.f]=c.checked);
+    const kept=[];
+    tb.innerHTML=C.map(c=>{
+      const offN=Math.min(Math.abs(c.aspect_deg),Math.abs(c.aspect_deg-360));
+      let drop=false;
+      if(f.slope&&c.slope_deg<28)drop=true;
+      if(f.elev&&c.elev_m<5000)drop=true;
+      if(f.north&&offN>60)drop=true;
+      if(!drop)kept.push(c);
+      const face=offN<=45?'N':(c.aspect_deg>135&&c.aspect_deg<225)?'S':(c.aspect_deg<=135?'E':'W');
+      return `<tr class="pick ${drop?'dropped':(f.slope&&f.elev&&f.north?'keep':'')}" data-lat="${c.lat}" data-lon="${c.lon}">
+        <td class="k">${c.id}</td><td class="n">${fmt(c.area_km2,2)}</td>
+        <td class="n">${Math.round(c.elev_m).toLocaleString()} m</td><td class="n">${fmt(c.slope_deg,0)}°</td>
+        <td class="n">${Math.round(c.aspect_deg)}° ${face}</td><td>${c.reading}</td></tr>`;
+    }).join('');
+    $$('#s4tbl tbody tr').forEach(tr=>tr.onclick=()=>{
+      $('#s4lat').value=tr.dataset.lat;$('#s4lon').value=tr.dataset.lon;probe();});
+    $('#s4left').textContent=kept.length;
+    if(kept.length){
+      const offs=kept.map(c=>{const o=Math.min(Math.abs(c.aspect_deg),Math.abs(c.aspect_deg-360));
+        return c.aspect_deg>180?-o:o;});
+      $('#s4asp').textContent=`${Math.round(Math.min(...offs))}° to ${Math.round(Math.max(...offs))}°`;
+      $('#s4dir').textContent=kept.every(c=>Math.min(Math.abs(c.aspect_deg),Math.abs(c.aspect_deg-360))<=60)?'NORTH':'mixed';
+    }
+    if(f.slope&&f.elev&&f.north){
+      const offs=kept.map(c=>Math.min(Math.abs(c.aspect_deg),Math.abs(c.aspect_deg-360)));
+      $('#s4itext').innerHTML=`Terrain does what the index could not. <b>${kept.length} candidates</b> survive — `+
+        `steep, high, not sun-facing. Nothing in this data picks between them and we will not pretend otherwise.<br><br>`+
+        `But every one lies within <b>${Math.round(Math.max(...offs))}° of north</b>. The original analysis assumed a `+
+        `<b>west-facing</b> slope. That fails whichever candidate is the scar — which is the part that does not `+
+        `depend on choosing one.`;
+      $('#s4insight').style.display='block';
+      T.res.candidates=kept.length;save();complete(4);
+    }
+  }
+  async function probe(){
+    const lat=parseFloat($('#s4lat').value),lon=parseFloat($('#s4lon').value);
+    const el=$('#p4');el.style.display='block';
+    const P=Proc.begin('#p4');
+    await P.cmd(`probe ${lat.toFixed(5)} N ${lon.toFixed(5)} E  --radius 5 cells (220 m)`);
+    if(!GRID){await P.line('  <span class="warn">run station 3 first to load the grid</span>');P.end();return;}
+    const g=D.meta.grid, b=g.aoi;
+    const x=Math.round((lon-b[0])/(b[2]-b[0])*g.w), y=Math.round((b[3]-lat)/(b[3]-b[1])*g.h);
+    if(x<0||x>=g.w||y<0||y>=g.h){await P.line('  <span class="no">outside the area of interest</span>');P.end();return;}
+    let n=0,sum=0,mn=9,snow=0,scar=0;
+    for(let dy=-5;dy<=5;dy++)for(let dx=-5;dx<=5;dx++){
+      const yy=y+dy,xx=x+dx;if(yy<0||yy>=g.h||xx<0||xx>=g.w)continue;
+      const i=yy*g.w+xx;if(!GRID.both[i])continue;
+      n++;sum+=GRID.d[i];mn=Math.min(mn,GRID.d[i]);
+      if(GRID.pre[i]>0.4)snow++; if(GRID.d[i]<-0.35)scar++;
+    }
+    await P.line(`  usable pixels ....... <span class="hl">${n}</span>`
+      +(n>=100?`  <span class="dim">(observed, not hidden by cloud)</span>`:''));
+    if(!n){await P.line('  <span class="warn">no data here — this is untested, not clean</span>');P.end();return;}
+    const mean=sum/n;
+    await P.line(`  mean dNDSI .......... <span class="${mean>0?'ok':'no'}">${mean>0?'+':''}${fmt(mean,3)}</span>`
+      +(mean>0?`  <span class="ok">it got BRIGHTER</span>`:''));
+    await P.line(`  most negative ....... ${fmt(mn,3)}`);
+    await P.line(`  was snow or ice ..... <span class="hl">${fmt(100*snow/n,1)}%</span>`);
+    await P.line(`  scar-like ........... <span class="${scar/n>0.3?'no':'ok'}">${fmt(100*scar/n,1)}%</span>`
+      +`  <span class="dim">against 7.5% across the whole AOI</span>`);
+    await P.gap();
+    if(mean>0&&scar/n<0.02) await P.line('<span class="no">NOT A SCAR.</span> Fresh snow on ground that was never glaciated — the opposite of a collapse in every measurable respect.');
+    else if(scar/n>0.3) await P.line('<span class="warn">scar-like.</span> Terrain decides whether it is a detachment, a deposit or melt.');
+    else await P.line('<span class="dim">ambiguous at this radius.</span>');
+    P.end();
+    complete(4);
+  }
+  $('#s4probebtn').onclick=probe;
+  $$('[data-probe]').forEach(b=>b.onclick=()=>{
+    const [la,lo]=b.dataset.probe.split(',');$('#s4lat').value=la;$('#s4lon').value=lo;probe();});
+  $$('.s4f').forEach(c=>c.onchange=render);
+  render();
+})();
+
+/* ================= station 5 ================= */
+(function(){
+  const cv=$('#s5canvas'),cx=cv.getContext('2d');
+  const pairs=D.offsets;
+  $('#s5pairs').innerHTML=pairs.map((p,i)=>
+    `<button class="btn ghost sm" data-i="${i}">${p.ref.slice(4,6)}/${p.ref.slice(6)}→${p.sec.slice(4,6)}/${p.sec.slice(6)}</button>`).join('');
+
+  // The graph is built in step with the console rather than painted at the end.
+  // A scatter that simply appears tells you nothing about where a floor comes
+  // from; watching the cloud land, then the median drop through it, then the
+  // envelope open out to 3 sigma, is the explanation.
+  let ST={};
+  async function run(i){
+    const p=pairs[i],v=p.sample_mm.map(Number);
+    const med=median(v), mad=median(v.map(x=>Math.abs(x-med)));
+    const sig=1.4826*mad, floor=3*sig/p.span_days;
+    ST={v,med,mad,sig,floor,lim:Math.max(sig*4,50),shown:0,stage:0};
+    const P=Proc.begin('#p5',11000);
+
+    frame();
+    await P.cmd(`read GOFF_${p.ref}_${p.sec} layer2 — range offsets, AOI clip`);
+    await P.line(`  <span class="hl">${p.n_total.toLocaleString()}</span> valid pixels, sampling `
+      +`<span class="hl">${v.length.toLocaleString()}</span> of them`);
+    // the cloud lands in chunks, and skips to full if we are out of budget
+    for(let f=1;f<=14;f++){
+      ST.shown=Math.round(v.length*f/14); frame();
+      if(P.rushing){ ST.shown=v.length; frame(); break; }
+      await sleep(34*P.mult);
+    }
+    ST.shown=v.length;
+
+    await P.cmd('median');
+    ST.stage=1; frame();
+    await P.line(`  ........................ <span class="hl">${fmt(med,2)} mm</span>`
+      +`  <span class="dim">the bulk shift, removed</span>`);
+    await P.cmd('MAD = median(|v - median|)');
+    ST.stage=2; frame();
+    await P.line(`  ........................ <span class="hl">${fmt(mad,2)} mm</span>`
+      +`  <span class="dim">half the points fall inside this</span>`);
+    await P.cmd('sigma = 1.4826 x MAD');
+    ST.stage=3; frame();
+    await P.line(`  ........................ <span class="hl">${fmt(sig,2)} mm</span>`
+      +`  <span class="dim">robust: outliers cannot inflate it</span>`);
+    await P.cmd(`floor = 3 sigma / ${p.span_days} days`);
+    ST.stage=4; frame();
+    await P.line(`  ........................ <span class="no">${fmt(floor,2)} mm/day</span>`);
+    const ref=D.reference.floors[p.pair];
+    const ok=Math.abs(sig-ref.sigma_mm)<0.05&&Math.abs(floor-ref.floor_mm_day)<0.05;
+    await P.gap();
+    await P.line(ok?`<span class="ok">✓ verified</span> — matches local_floor.detection_floor to 0.05 mm`
+      :`<span class="no">✗ mismatch</span> — browser ${fmt(floor,3)} vs reference ${ref.floor_mm_day}`);
+    P.end();
+
+    $('#s5n').textContent=v.length.toLocaleString();
+    $('#s5med').textContent=fmt(med,1)+' mm';
+    $('#s5sig').textContent=fmt(sig,1)+' mm';
+    $('#s5floor').textContent=fmt(floor,1);
+
+    const cover=pairs.filter(q=>q.pre_event&&q.span_days>0&&q.ref>='20260629')
+      .map(q=>detectionFloor(q.sample_mm.map(Number),q.span_days));
+    const worstAoi=Math.max(...cover), sf=D.scar_floor||{}, worstPoint=sf.worst_point||worstAoi;
+    $('#s5itext').innerHTML=`You measured <b>${fmt(floor,1)} mm/day</b> here. Across the three intervals covering `+
+      `the seven weeks before the collapse the floor runs <b>${fmt(Math.min(...cover),1)}</b> to `+
+      `<b>${fmt(worstAoi,1)} mm/day</b>. A bound holding across a window is set by its <em>weakest</em> interval.<br><br>`+
+      `<b>But that is an average over 82 km².</b> The mountain failed on one hillside. In a 1 km window on `+
+      `candidate ${sf.candidate||'4'} — the one at the published elevation — one pixel reads `+(sf.covering?sf.covering.map(c=>`<b>${fmt(c.point,1)}</b>`).join(', '):'—')+
+      ` mm/day, worst <b>${fmt(worstPoint,1)}</b>. Averaged over the whole 1 km window instead of one pixel the worst is `+
+      `<b>${fmt(sf.worst_block||NaN,1)}</b>. Quote both: one pixel is the pessimistic end, the window median the optimistic one. `+
+      `<span class="badge pre">PRE-COMPUTED</span> those need the full rasters.`;
+    $('#s5insight').style.display='block';
+    T.res.floor=floor;T.res.worstAoi=worstAoi;T.res.worstFloor=worstPoint;save();complete(5);
+  }
+  // One frame of the build. ST.shown is how much of the cloud has landed,
+  // ST.stage is how far the explanation has got: 1 median, 2 MAD, 3 sigma,
+  // 4 the floor itself.
+  function frame(){
+    const {v,med,mad,sig,lim,shown,stage}=ST;
+    if(!v) return;
+    const W=cv.width,H=cv.height,c=getComputedStyle(document.documentElement);
+    const edge=c.getPropertyValue('--edge'),dim=c.getPropertyValue('--dim'),
+          live=c.getPropertyValue('--live'),alarm=c.getPropertyValue('--alarm'),
+          snow=c.getPropertyValue('--snow');
+    const mid=H/2, sc=(H/2-34)/lim, L=66, R=W-28;
+    cx.clearRect(0,0,W,H);
+    cx.strokeStyle=edge;cx.lineWidth=1;
+    cx.beginPath();cx.moveTo(L,mid);cx.lineTo(R,mid);cx.stroke();
+
+    if(stage>=2){                       // the MAD band, drawn under the points
+      cx.fillStyle=live;cx.globalAlpha=.10;
+      cx.fillRect(L,mid-mad*sc,R-L,2*mad*sc);cx.globalAlpha=1;
+    }
+    const step=Math.max(1,Math.floor(v.length/1100));
+    cx.fillStyle=live;cx.globalAlpha=.30;
+    for(let n=0;n<shown;n+=step){
+      const x=L+(n/v.length)*(R-L),y=mid-(v[n]-med)*sc;
+      cx.beginPath();cx.arc(x,Math.max(5,Math.min(H-5,y)),3,0,7);cx.fill();
+    }
+    cx.globalAlpha=1;
+    if(shown<v.length){                 // a leading edge, so it reads as landing
+      const x=L+(shown/v.length)*(R-L);
+      cx.strokeStyle=live;cx.globalAlpha=.5;cx.lineWidth=2;
+      cx.beginPath();cx.moveTo(x,18);cx.lineTo(x,H-18);cx.stroke();cx.globalAlpha=1;
+    }
+    if(stage>=1){
+      cx.strokeStyle=snow;cx.lineWidth=2;
+      cx.beginPath();cx.moveTo(L,mid);cx.lineTo(R,mid);cx.stroke();
+      cx.fillStyle=snow;cx.font='700 19px "JetBrains Mono",monospace';
+      cx.fillText('median',L+6,mid-10);
+    }
+    if(stage>=2){
+      cx.strokeStyle=live;cx.lineWidth=2;cx.setLineDash([3,4]);
+      [-1,1].forEach(k=>{const y=mid-k*mad*sc;
+        cx.beginPath();cx.moveTo(L,y);cx.lineTo(R,y);cx.stroke();});
+      cx.setLineDash([]);cx.fillStyle=live;cx.font='700 19px "JetBrains Mono",monospace';
+      cx.fillText('MAD',R-300,mid-mad*sc-9);
+    }
+    if(stage>=3){
+      cx.strokeStyle=dim;cx.lineWidth=2;cx.setLineDash([4,5]);
+      [-1,1].forEach(k=>{const y=mid-k*sig*sc;
+        cx.beginPath();cx.moveTo(L,y);cx.lineTo(R,y);cx.stroke();});
+      cx.setLineDash([]);cx.fillStyle=dim;cx.font='700 19px "JetBrains Mono",monospace';
+      cx.fillText('1σ = 1.4826 × MAD',R-300,mid-sig*sc-9);
+    }
+    if(stage>=4){
+      cx.strokeStyle=alarm;cx.lineWidth=3;cx.setLineDash([10,7]);
+      [-1,1].forEach(k=>{const y=mid-k*3*sig*sc;
+        cx.beginPath();cx.moveTo(L,y);cx.lineTo(R,y);cx.stroke();});
+      cx.setLineDash([]);cx.fillStyle=alarm;cx.font='700 21px "JetBrains Mono",monospace';
+      cx.fillText('3σ — below this line, motion is noise',R-560,mid-3*sig*sc-11);
+    }
+    cx.fillStyle=dim;cx.font='18px "JetBrains Mono",monospace';cx.fillText('offset, mm',10,24);
+  }
+  $$('#s5pairs button').forEach(b=>b.onclick=()=>{
+    $$('#s5pairs button').forEach(x=>x.style.opacity=.5);b.style.opacity=1;run(+b.dataset.i);});
+})();
+
+/* ================= station 6 ================= */
+(function(){
+  const cv=$('#s6canvas'),cx=cv.getContext('2d');
+  const SLOPE=39;
+  let announced=false;
+  const compass=a=>['north','north-east','east','south-east','south','south-west','west','north-west'][Math.round(a/45)%8];
+
+  function draw(asp){
+    const W=cv.width,H=cv.height,c=getComputedStyle(document.documentElement);
+    const edge=c.getPropertyValue('--edge'),dim=c.getPropertyValue('--dim'),
+          snow=c.getPropertyValue('--snow'),live=c.getPropertyValue('--live'),
+          alarm=c.getPropertyValue('--alarm'),go=c.getPropertyValue('--go');
+    cx.clearRect(0,0,W,H);
+    const cxx=290,cyy=H/2,R=168;
+    cx.strokeStyle=edge;cx.lineWidth=2;cx.beginPath();cx.arc(cxx,cyy,R,0,7);cx.stroke();
+    cx.fillStyle=dim;cx.font='20px "JetBrains Mono",monospace';
+    [['N',0],['E',90],['S',180],['W',270]].forEach(([l,a])=>{const t=rad(a-90);
+      cx.fillText(l,cxx+Math.cos(t)*(R+26)-7,cyy+Math.sin(t)*(R+26)+7);});
+    const t=rad(asp-90);
+    cx.strokeStyle=live;cx.lineWidth=8;cx.lineCap='round';
+    cx.beginPath();cx.moveTo(cxx,cyy);cx.lineTo(cxx+Math.cos(t)*R*.86,cyy+Math.sin(t)*R*.86);cx.stroke();
+    cx.fillStyle=live;cx.font='700 21px "JetBrains Mono",monospace';
+    cx.fillText('downslope',cxx-50,cyy+R+54);
+    cx.fillStyle=snow;cx.font='700 32px "JetBrains Mono",monospace';
+    cx.fillText(Math.round(asp)+'°',cxx-26,cyy-R-24);
+    const x0=630,bw=760;let okc=0,n98=0,n48=0;
+    D.tracks.forEach((tr,i)=>{
+      const s=sensitivity(tr,SLOPE,asp),a=Math.abs(s),ok=a>=0.3;
+      if(ok)okc++;
+      if(tr.name.indexOf('NISAR ASC')===0)n98=s;
+      if(tr.name.indexOf('NISAR DESC')===0)n48=s;
+      const y=64+i*106;
+      cx.fillStyle=dim;cx.font='19px "JetBrains Mono",monospace';cx.fillText(tr.name,x0,y-12);
+      cx.fillStyle=edge;cx.fillRect(x0,y,bw,26);
+      cx.fillStyle=ok?go:alarm;cx.fillRect(x0,y,bw*Math.min(1,a),26);
+      cx.strokeStyle=dim;cx.setLineDash([5,5]);cx.lineWidth=2;
+      cx.beginPath();cx.moveTo(x0+bw*.3,y-6);cx.lineTo(x0+bw*.3,y+32);cx.stroke();cx.setLineDash([]);
+      cx.fillStyle=ok?go:alarm;cx.font='700 21px "JetBrains Mono",monospace';
+      cx.fillText((s>=0?'+':'')+fmt(s,3)+(ok?'':'   BLIND'),x0+bw+16,y+20);});
+    cx.fillStyle=dim;cx.font='17px "JetBrains Mono",monospace';
+    cx.fillText('0.3 = below this, motion is lost in noise',x0+bw*.3-230,40);
+    $('#s6v').textContent=Math.round(asp)+'° ('+compass(asp)+')';
+    $('#s6n98').textContent=fmt(n98,3);$('#s6n48').textContent=fmt(n48,3);
+    $('#s6ok').textContent=okc+' of 5';
+    const fl=T.res.worstFloor||32.0;
+    $('#s6bound').textContent=fmt(fl/Math.abs(n98),0)+' mm/d';
+    T.res.aspect=asp;T.res.sens=n98;T.res.bound=fl/Math.abs(n98);save();
+    return {n98,okc,fl};
+  }
+  async function announce(asp){
+    const {n98,fl}=draw(asp);
+    const P=Proc.begin('#p6');
+    await P.cmd(`sensitivity = downslope(39°, ${Math.round(asp)}°) · line-of-sight(NISAR ASC 098)`);
+    await P.line(`  ........................ <span class="${Math.abs(n98)>=.3?'ok':'no'}">${fmt(n98,3)}</span>`
+      +(Math.abs(n98)>=.3?'  usable':'  <span class="no">BLIND</span>'));
+    await P.line(`  floor ${fmt(fl,1)} / ${fmt(Math.abs(n98),3)} = <span class="no">${fmt(fl/Math.abs(n98),0)} mm/day</span> of downslope motion`);
+    const key=String(Math.round(asp));
+    if(D.reference.sensitivity[key]){
+      const exp=D.reference.sensitivity[key];
+      const bad=D.tracks.filter(tr=>Math.abs(sensitivity(tr,SLOPE,asp)-exp[tr.name])>0.002);
+      await P.line(bad.length?`<span class="no">✗ mismatch on ${bad.length} track(s)</span>`
+        :`<span class="ok">✓ verified</span> — all five match geometry_merge.sensitivities at ${key}°`);
+    }
+    P.end();
+    if(!announced){
+      const s273=Math.abs(sensitivity(D.tracks[0],SLOPE,273));
+      $('#s6itext').innerHTML=`At <b>273°</b> — taken from an elevation model at a coordinate read off a news `+
+        `report — NISAR ascending reads <b>${fmt(s273,3)}</b> and your floor becomes <b>${fmt(fl/s273,0)} mm/day</b>. `+
+        `At <b>${Math.round(asp)}°</b>, where the candidates actually face, it is <b>${fmt(Math.abs(n98),3)}</b> and the `+
+        `same floor becomes <b>${fmt(fl/Math.abs(n98),0)} mm/day</b>.<br><br>`+
+        `Nothing about the radar changed. Only which way we believed the hill was facing.`;
+      $('#s6insight').style.display='block';announced=true;
+    }
+    complete(6);
+  }
+  let deb=null;
+  $('#s6slider').oninput=e=>{
+    const a=+e.target.value; draw(a);
+    clearTimeout(deb); deb=setTimeout(()=>announce(a),320);   // report once you stop dragging
+  };
+  $$('[data-asp]').forEach(b=>b.onclick=()=>{
+    const a=+b.dataset.asp;$('#s6slider').value=a;announce(a);});
+  draw(273);
+})();
+
+/* ================= station 7 ================= */
+(function(){
+  const cv=$('#s7canvas'),cx=cv.getContext('2d');
+  const EV=new Date('2026-08-26');
+  const key=d=>d.toISOString().slice(0,10).replace(/-/g,'');
+  function velocities(rows,floors){
+    const out=[];
+    for(let i=0;i<rows.length-1;i++){
+      const a=new Date(rows[i].epoch),b=new Date(rows[i+1].epoch);
+      const dt=Math.round((b-a)/864e5);if(dt<=0)continue;
+      out.push({t0:a,t1:b,days:dt,v:(rows[i+1].cum_mm-rows[i].cum_mm)/dt,
+        floor:floors[key(a)+'_'+key(b)]??null});}
+    return out;
+  }
+  function fitInv(win){
+    const t=win.map(w=>(w.mid-win[0].mid)/864e5),y=win.map(w=>1/Math.abs(w.v));
+    const n=t.length,mt=t.reduce((a,b)=>a+b)/n,my=y.reduce((a,b)=>a+b)/n;
+    let sxy=0,sxx=0;for(let i=0;i<n;i++){sxy+=(t[i]-mt)*(y[i]-my);sxx+=(t[i]-mt)**2;}
+    const a=sxy/sxx,b=my-a*mt;let ssr=0,sst=0;
+    for(let i=0;i<n;i++){ssr+=(y[i]-(a*t[i]+b))**2;sst+=(y[i]-my)**2;}
+    return {a,b,r2:sst>0?1-ssr/sst:0,tf:-b/a};
+  }
+  $('#s7run').onclick=async()=>{
+    $('#s7run').disabled=true;
+    const cut=$('#s7cut').checked;
+    const P=Proc.begin('#p7');
+    await P.cmd(`inverse_velocity --ts ts_goff_source.csv --floors goff_stats_source.csv${cut?' --event-date 2026-08-26':' --allow-post-event'}`);
+    await P.line(`  gate: each velocity must clear <span class="hl">its own pair's</span> measured floor`);
+    if(!cut) await P.line(`  <span class="no">cutoff DISABLED</span> — post-event intervals will be admitted`);
+    let nv=0,np=0,alarms=[];const sets=[];
+    for(const [name,rows] of Object.entries(D.series.blocks)){
+      let vs=velocities(rows,D.series.floors);
+      const leak=vs.filter(w=>w.t1>=EV);
+      if(cut)vs=vs.filter(w=>w.t1<EV);
+      vs.forEach(w=>w.mid=new Date(+w.t0+(w.t1-w.t0)/2));
+      nv+=vs.length;
+      await P.gap();
+      await P.cmd(`block ${name.split('|')[0]} / ${name.split('|')[1]}`);
+      if(cut&&leak.length)for(const w of leak)
+        await P.line(`  <span class="warn">DROPPED</span> ${key(w.t0)}→${key(w.t1)}  ends on or after the collapse`);
+      if(!cut&&leak.length)for(const w of leak)
+        await P.line(`  <span class="no">ADMITTED</span> ${key(w.t0)}→${key(w.t1)}  <span class="no">spans the collapse</span>`);
+      const pass=[];
+      for(const w of vs){
+        const ok=w.floor!=null&&Math.abs(w.v)>w.floor;
+        if(ok)pass.push(w);
+        await P.line(`  ${key(w.t0)}→${key(w.t1)}  ${(w.v>=0?'+':'')}${fmt(w.v,2)} mm/d`
+          +`   floor ${w.floor==null?'  — ':fmt(w.floor,1).padStart(5)}`
+          +`   ${ok?'<span class="no">ABOVE</span>':'<span class="ok">below</span>'}`);
+      }
+      np+=pass.length;sets.push({name,vs,pass});
+      if(pass.length>=3){
+        const f=fitInv(pass.slice(-3));
+        await P.line(`  fit 1/v on 3 velocities: slope ${fmt(f.a,5)}, R² ${fmt(f.r2,2)}`);
+        if(f.a<0&&f.r2>=0.7){
+          const d=new Date(+pass.slice(-3)[0].mid+f.tf*864e5);
+          const lead=Math.round((d-pass[pass.length-1].t1)/864e5);
+          if(lead>0&&lead<=60){alarms.push({d,lead});
+            await P.line(`  <span class="no">*** ALARM *** predicted ${d.toISOString().slice(0,10)}, lead ${lead} d</span>`);}
+        }
+      } else await P.line(`  <span class="ok">→ no alarm</span>: ${pass.length} of ${vs.length} cleared their floor, the fit needs 3`);
+    }
+    await P.gap();
+    await P.line(alarms.length?`<span class="no">${alarms.length} alarm(s)</span>`
+      :`<span class="ok">✓ no alarm in any block</span> — and the floor says exactly why`);
+    P.end();
+    // plot
+    const W=cv.width,H=cv.height,c=getComputedStyle(document.documentElement);
+    const edge=c.getPropertyValue('--edge'),dim=c.getPropertyValue('--dim'),
+          live=c.getPropertyValue('--live'),alarm=c.getPropertyValue('--alarm');
+    cx.clearRect(0,0,W,H);
+    const t0=+new Date('2025-11-01'),t1=+new Date('2026-09-10');
+    const vmax=Math.max(40,...sets.flatMap(s=>s.vs.map(w=>Math.abs(w.v))),
+      ...sets.flatMap(s=>s.vs.map(w=>w.floor||0)));
+    const X=t=>76+(t-t0)/(t1-t0)*(W-124),Y=v=>H-64-(v/vmax)*(H-120);
+    cx.strokeStyle=edge;cx.lineWidth=2;cx.beginPath();cx.moveTo(76,H-64);cx.lineTo(W-48,H-64);cx.stroke();
+    const ex=X(+EV);cx.strokeStyle=alarm;cx.setLineDash([9,7]);
+    cx.beginPath();cx.moveTo(ex,26);cx.lineTo(ex,H-64);cx.stroke();cx.setLineDash([]);
+    cx.fillStyle=alarm;cx.font='700 20px "JetBrains Mono",monospace';cx.fillText('the collapse',ex+10,44);
+    sets.forEach(s=>s.vs.forEach(w=>{
+      const x=X(+w.mid),y=Y(Math.abs(w.v));
+      if(w.floor!=null){cx.strokeStyle=dim;cx.lineWidth=3;cx.globalAlpha=.5;
+        cx.beginPath();cx.moveTo(x-13,Y(w.floor));cx.lineTo(x+13,Y(w.floor));cx.stroke();cx.globalAlpha=1;}
+      cx.fillStyle=(w.floor!=null&&Math.abs(w.v)>w.floor)?alarm:live;
+      cx.beginPath();cx.arc(x,y,7,0,7);cx.fill();}));
+    cx.fillStyle=dim;cx.font='18px "JetBrains Mono",monospace';
+    cx.fillText("speed, mm/day   (dashes = that pair's own floor)",80,24);
+    $('#s7blk').textContent=Object.keys(D.series.blocks).length;
+    $('#s7vel').textContent=nv;$('#s7pass').textContent=np;$('#s7alarm').textContent=alarms.length;
+    $('#s7alarmro').className='ro '+(alarms.length?'bad':'good');
+    $('#s7ititle').textContent=cut?'No alarm — and the floor says why'
+      :(alarms.length?'That alarm is made of hindsight':'The cutoff is off');
+    $('#s7itext').innerHTML=cut
+      ?`<b>${np} of ${nv}</b> velocities cleared their own pair's floor. The fit needs three in a row. Nothing on `+
+       `this slope moved fast enough to be told apart from noise.<br><br>Now untick the box and run it again — it `+
+       `admits the image pair that <em>spans</em> the collapse.`
+      :(alarms.length
+        ?`The detector announced a failure date with <b>${alarms[0].lead} days of lead</b>. It is worthless: the `+
+         `interval it leaned on <em>contains the collapse</em>. A forecast may only use data that existed before the `+
+         `thing it forecasts. This project published exactly that error once.`
+        :`Admitting post-event data did not manufacture an alarm here, because both event-spanning intervals also sit `+
+         `below their floors. On data where they do not, this is how a detector announces a lead time built entirely `+
+         `on hindsight — and this project made that mistake once.`);
+    $('#s7insight').style.display='block';
+    T.res.alarms=alarms.length;save();complete(7);
+    $('#s7run').disabled=false;
+  };
+})();
+
+/* ================= station 8 ================= */
+(function(){
+  const cv=$('#s8canvas'),cx=cv.getContext('2d');
+  function paint(){
+    const fl=T.res.worstFloor,sens=Math.abs(T.res.sens||0),bound=(fl&&sens)?fl/sens:null;
+    $('#s8floor').textContent=fl?fmt(fl,1)+' mm/d':'– station 5';
+    $('#s8sens').textContent=T.res.sens?fmt(T.res.sens,3):'– station 6';
+    $('#s8bound').textContent=bound?fmt(bound,0)+' mm/d':'–';
+    $('#s8alarm').textContent=T.res.alarms!=null?T.res.alarms:'– station 7';
+    if(!bound){$('#s8verdict').textContent='Work through the stations and your own numbers appear here.';return;}
+    // Line of sight against line of sight. The precursor is a Sentinel-1 rate
+    // the reports never call downslope, so it is compared with the LOS floor,
+    // not with the downslope bound - dividing by that doubled the gap once.
+    const P=(D.bound&&D.bound.precursor_mm_day)||0.3333,DAYS=222,W=cv.width,H=cv.height;
+    const c=getComputedStyle(document.documentElement);
+    const edge=c.getPropertyValue('--edge'),dim=c.getPropertyValue('--dim'),
+          live=c.getPropertyValue('--live'),alarm=c.getPropertyValue('--alarm');
+    cx.clearRect(0,0,W,H);
+    const x0=56,bw=W-410,real=P*DAYS,need=fl*DAYS;
+    [['what the slope actually did',real,live,(real/10).toFixed(1)+' cm'],
+     ['what NISAR needed to notice',need,alarm,(need/1000).toFixed(1)+' m']].forEach(([lab,val,col,txt],i)=>{
+      const y=62+i*132;
+      cx.fillStyle=dim;cx.font='21px "JetBrains Mono",monospace';cx.fillText(lab,x0,y-14);
+      cx.fillStyle=edge;cx.fillRect(x0,y,bw,42);
+      cx.fillStyle=col;cx.fillRect(x0,y,Math.max(4,bw*val/need),42);
+      cx.fillStyle=col;cx.font='700 30px "JetBrains Mono",monospace';cx.fillText(txt,x0+bw+20,y+32);});
+    const blk=(D.scar_floor&&D.scar_floor.worst_block)||NaN;
+    $('#s8verdict').innerHTML=`Over 222 days it moved <b>${(real/10).toFixed(1)} cm</b> in line of sight.<br>`+
+      `One pixel needed <span>${(need/1000).toFixed(1)} metres</span> to see it — `+
+      `<b>${fmt(fl/P,0)}×</b> too little. Averaged over 1 km, <b>${fmt(blk/P,0)}×</b>.`;
+  }
+  window.__paintS8=paint;
+  new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting)paint();}),{threshold:.2}).observe($('#st8'));
+  paint();
+})();
+
+/* ---- boot ---- */
+[...T.done].forEach(n=>{const s=$('#st'+n);if(s)s.classList.remove('pending');});
+paintRail();
+$$('.station').forEach(s=>new IntersectionObserver(es=>es.forEach(e=>{
+  if(e.isIntersecting){T.at=+e.target.id.slice(2);paintRail();}}),{threshold:.3}).observe(s));
+</script>

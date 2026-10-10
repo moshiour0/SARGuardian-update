@@ -1,0 +1,5 @@
+id,lat,lon,elev_m,aspect_deg,matches_published_elevation,nisar_asc_sensitivity,goff_intervals,los_floor_pixel_mm_day,los_floor_block_mm_day,downslope_bound_mm_day,ratio_los_pixel,ratio_los_block,max_speed_common_datum_mm_day,phase_pairs,phase_floor_pixel_mm_day,phase_floor_block_mm_day
+1,28.26459,85.49739,6255.0,12.4,False,-0.488,3,31.21,9.2,63.9,93.6,27.6,11.62,5,13.9,4.09
+4,28.27799,85.52983,5370.0,350.7,True,-0.475,3,32.01,9.2,67.4,96.0,27.6,5.19,0,nan,nan
+5,28.2702,85.51853,6009.0,346.5,False,-0.533,3,29.76,9.2,55.9,89.3,27.6,2.7,6,13.6,4.09
+9,28.2546,85.47591,6099.0,9.0,False,-0.268,0,nan,nan,nan,nan,nan,nan,0,nan,nan

@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+title: >-
+  SARGuardian: measured limits of NISAR L-band SAR for
+  Himalayan slope-failure early warning
+message: >-
+  If you use this software or its results, please cite it.
+type: software
+authors:
+  - family-names: Sarker
+    given-names: Moshiour Rahman
+repository-code: https://github.com/moshiour0/SARGuardian
+abstract: >-
+  A pipeline and measurement campaign testing what NISAR Level-2
+  products can and cannot see of a Himalayan slope failure. At the
+  Sentinel-2 candidate scar that matches the published detachment
+  elevation of the 26 August 2026 Langtang Lirung collapse, NISAR
+  ascending offset tracking had a line-of-sight detection floor of
+  9.2 mm/day (1 km window median) to 32.0 mm/day (one pixel) in the
+  seven weeks before failure: 28 to 96 times the 0.33 mm/day
+  precursor Sentinel-1 interferometry measured there. NISAR phase has
+  no valid pixel at that candidate in any pair. The failure itself is
+  detectable as loss of correlation, at 14-35 times the event-free
+  baseline. Winter products are BETA and summer PROVISIONAL, and the
+  public archive has no products for January-June 2026; both are
+  stated as limits.
+keywords:
+  - InSAR
+  - NISAR
+  - synthetic aperture radar
+  - offset tracking
+  - landslide
+  - early warning
+  - Himalaya
+license: MIT

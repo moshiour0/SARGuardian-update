@@ -1,0 +1,509 @@
+{
+ "type": "FeatureCollection",
+ "features": [
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.56021228070176,
+     28.304947281553396
+    ]
+   },
+   "properties": {
+    "sill_m": 3997.0,
+    "upstream_cells": 535,
+    "upstream_area_km2": 4.436038008372329,
+    "by_height": {
+     "10.0": {
+      "volume_Mm3": 0.32337473332059974,
+      "area_km2": 0.0663332786298666,
+      "backwater_km": 0.38632956228926374,
+      "truncated": false
+     },
+     "25.0": {
+      "volume_Mm3": 1.7744152033489315,
+      "area_km2": 0.12437489743099987,
+      "backwater_km": 0.5151060830523516,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 6.127536613433927,
+      "area_km2": 0.22387481537579978,
+      "backwater_km": 0.9109647638349726,
+      "truncated": true
+     },
+     "100.0": {
+      "volume_Mm3": 23.224939180282046,
+      "area_km2": 0.41458299143666627,
+      "backwater_km": 1.1880047959034568,
+      "truncated": true
+     },
+     "150.0": {
+      "volume_Mm3": 48.73837647329449,
+      "area_km2": 0.588707847840066,
+      "backwater_km": 1.3455611629927444,
+      "truncated": true
+     }
+    },
+    "max_volume_Mm3": 48.73837647329449,
+    "efficiency_Mm3_per_m": 0.032337473332059975,
+    "volume_at_min_height_Mm3": 0.32337473332059974,
+    "truncated": true
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.53609614035088,
+     28.28845213592233
+    ]
+   },
+   "properties": {
+    "sill_m": 5252.0,
+    "upstream_cells": 224,
+    "upstream_area_km2": 1.857331801636265,
+    "by_height": {
+     "25.0": {
+      "volume_Mm3": 0.6467494666411995,
+      "area_km2": 0.0663332786298666,
+      "backwater_km": 0.4068653520900286,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 3.81416352121733,
+      "area_km2": 0.1989998358895998,
+      "backwater_km": 0.7726591245785275,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 21.666107132480178,
+      "area_km2": 0.48091627006653287,
+      "backwater_km": 1.2877652076308792,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 50.33866682024002,
+      "area_km2": 0.6467494666411995,
+      "backwater_km": 1.4825194615613777,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 50.33866682024002,
+    "efficiency_Mm3_per_m": 0.02586997866564798,
+    "volume_at_min_height_Mm3": 0.6467494666411995,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.48508122807017,
+     28.325566213592232
+    ]
+   },
+   "properties": {
+    "sill_m": 3034.0,
+    "upstream_cells": 1193,
+    "upstream_area_km2": 9.891950175678856,
+    "by_height": {
+     "50.0": {
+      "volume_Mm3": 1.1608323760226655,
+      "area_km2": 0.04974995897239995,
+      "backwater_km": 0.2575530415261758,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 6.119244953605195,
+      "area_km2": 0.1658331965746665,
+      "backwater_km": 0.5832498807091014,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 18.57331801636265,
+      "area_km2": 0.32337473332059974,
+      "backwater_km": 0.9109647638349726,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 18.57331801636265,
+    "efficiency_Mm3_per_m": 0.023216647520453312,
+    "volume_at_min_height_Mm3": 1.1608323760226655,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.47487824561404,
+     28.27608077669903
+    ]
+   },
+   "properties": {
+    "sill_m": 4550.0,
+    "upstream_cells": 76,
+    "upstream_area_km2": 0.6301661469837327,
+    "by_height": {
+     "10.0": {
+      "volume_Mm3": 0.23216647520453312,
+      "area_km2": 0.0331666393149333,
+      "backwater_km": 0.20379427817383472,
+      "truncated": false
+     },
+     "25.0": {
+      "volume_Mm3": 0.994999179447999,
+      "area_km2": 0.07462493845859994,
+      "backwater_km": 0.4554823819174863,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 3.4742054682392634,
+      "area_km2": 0.11608323760226656,
+      "backwater_km": 0.5151060830523516,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 10.02461673293859,
+      "area_km2": 0.14095821708846654,
+      "backwater_km": 0.5828710500157864,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 18.117276725782315,
+      "area_km2": 0.17412485640339984,
+      "backwater_km": 0.6562601257764594,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 18.117276725782315,
+    "efficiency_Mm3_per_m": 0.023216647520453312,
+    "volume_at_min_height_Mm3": 0.23216647520453312,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.56485,
+     28.270307475728156
+    ]
+   },
+   "properties": {
+    "sill_m": 5803.0,
+    "upstream_cells": 78,
+    "upstream_area_km2": 0.6467494666411995,
+    "by_height": {
+     "25.0": {
+      "volume_Mm3": 0.5555412085251329,
+      "area_km2": 0.04974995897239995,
+      "backwater_km": 0.2882937743760257,
+      "truncated": true
+     },
+     "50.0": {
+      "volume_Mm3": 2.2553314734154646,
+      "area_km2": 0.08291659828733325,
+      "backwater_km": 0.40758855634766944,
+      "truncated": true
+     },
+     "100.0": {
+      "volume_Mm3": 9.021325893661858,
+      "area_km2": 0.17412485640339984,
+      "backwater_km": 0.5832498807091014,
+      "truncated": true
+     },
+     "150.0": {
+      "volume_Mm3": 18.94644270865565,
+      "area_km2": 0.22387481537579978,
+      "backwater_km": 0.7110017575461958,
+      "truncated": true
+     }
+    },
+    "max_volume_Mm3": 18.94644270865565,
+    "efficiency_Mm3_per_m": 0.022221648341005314,
+    "volume_at_min_height_Mm3": 0.5555412085251329,
+    "truncated": true
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.54722666666667,
+     28.248039029126215
+    ]
+   },
+   "properties": {
+    "sill_m": 4345.0,
+    "upstream_cells": 652,
+    "upstream_area_km2": 5.406162208334129,
+    "by_height": {
+     "25.0": {
+      "volume_Mm3": 0.5555412085251329,
+      "area_km2": 0.05804161880113328,
+      "backwater_km": 0.2575530415261758,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 2.288498112730398,
+      "area_km2": 0.08291659828733325,
+      "backwater_km": 0.3285038230020536,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 7.15570243219686,
+      "area_km2": 0.11608323760226656,
+      "backwater_km": 0.4554823819174863,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 14.410904782338518,
+      "area_km2": 0.17412485640339984,
+      "backwater_km": 0.5832498807091014,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 14.410904782338518,
+    "efficiency_Mm3_per_m": 0.022221648341005314,
+    "volume_at_min_height_Mm3": 0.5555412085251329,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.49435666666666,
+     28.312370097087378
+    ]
+   },
+   "properties": {
+    "sill_m": 3431.0,
+    "upstream_cells": 298,
+    "upstream_area_km2": 2.4709146289625306,
+    "by_height": {
+     "100.0": {
+      "volume_Mm3": 2.1309565759844644,
+      "area_km2": 0.05804161880113328,
+      "backwater_km": 0.37593479472188734,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 6.028036695489127,
+      "area_km2": 0.0994999179447999,
+      "backwater_km": 0.5765875487520514,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 6.028036695489127,
+    "efficiency_Mm3_per_m": 0.021309565759844645,
+    "volume_at_min_height_Mm3": 2.1309565759844644,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.5064147368421,
+     28.296699708737865
+    ]
+   },
+   "properties": {
+    "sill_m": 3709.0,
+    "upstream_cells": 671,
+    "upstream_area_km2": 5.563703745080061,
+    "by_height": {
+     "25.0": {
+      "volume_Mm3": 0.5306662290389328,
+      "area_km2": 0.041458299143666624,
+      "backwater_km": 0.3285038230020536,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 2.313373092216598,
+      "area_km2": 0.10779157777353324,
+      "backwater_km": 0.6570076460041072,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 10.27336652780059,
+      "area_km2": 0.21558315554706647,
+      "backwater_km": 0.8596034604463143,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 22.072398464088113,
+      "area_km2": 0.2570414546907331,
+      "backwater_km": 0.9382399286989721,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 22.072398464088113,
+    "efficiency_Mm3_per_m": 0.021226649161557313,
+    "volume_at_min_height_Mm3": 0.5306662290389328,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.46003754385964,
+     28.312370097087378
+    ]
+   },
+   "properties": {
+    "sill_m": 3410.0,
+    "upstream_cells": 106,
+    "upstream_area_km2": 0.8789159418457325,
+    "by_height": {
+     "100.0": {
+      "volume_Mm3": 2.0480399776971314,
+      "area_km2": 0.04974995897239995,
+      "backwater_km": 0.2575530415261758,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 5.455912167306528,
+      "area_km2": 0.08291659828733325,
+      "backwater_km": 0.38632956228926374,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 5.455912167306528,
+    "efficiency_Mm3_per_m": 0.020480399776971314,
+    "volume_at_min_height_Mm3": 2.0480399776971314,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.54444403508772,
+     28.317318640776698
+    ]
+   },
+   "properties": {
+    "sill_m": 3886.0,
+    "upstream_cells": 292,
+    "upstream_area_km2": 2.421164669990131,
+    "by_height": {
+     "25.0": {
+      "volume_Mm3": 0.48091627006653287,
+      "area_km2": 0.04974995897239995,
+      "backwater_km": 0.3285038230020536,
+      "truncated": false
+     },
+     "50.0": {
+      "volume_Mm3": 2.3465397315315313,
+      "area_km2": 0.12437489743099987,
+      "backwater_km": 0.5832498807091014,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 11.51711550211059,
+      "area_km2": 0.24874979486199975,
+      "backwater_km": 0.7113813541672479,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 25.961186923764043,
+      "area_km2": 0.3150830734918664,
+      "backwater_km": 0.9014356453416154,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 25.961186923764043,
+    "efficiency_Mm3_per_m": 0.019236650802661313,
+    "volume_at_min_height_Mm3": 0.48091627006653287,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.51476263157895,
+     28.284328349514563
+    ]
+   },
+   "properties": {
+    "sill_m": 4031.0,
+    "upstream_cells": 467,
+    "upstream_area_km2": 3.872205140018463,
+    "by_height": {
+     "50.0": {
+      "volume_Mm3": 0.8872076016744658,
+      "area_km2": 0.0331666393149333,
+      "backwater_km": 0.1287765207630879,
+      "truncated": false
+     },
+     "100.0": {
+      "volume_Mm3": 3.2503306528634632,
+      "area_km2": 0.0663332786298666,
+      "backwater_km": 0.2575530415261758,
+      "truncated": false
+     },
+     "150.0": {
+      "volume_Mm3": 6.78257773990386,
+      "area_km2": 0.08291659828733325,
+      "backwater_km": 0.3281300628882297,
+      "truncated": false
+     }
+    },
+    "max_volume_Mm3": 6.78257773990386,
+    "efficiency_Mm3_per_m": 0.017744152033489315,
+    "volume_at_min_height_Mm3": 0.8872076016744658,
+    "truncated": false
+   }
+  },
+  {
+   "type": "Feature",
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     85.45911,
+     28.287627378640778
+    ]
+   },
+   "properties": {
+    "sill_m": 3792.0,
+    "upstream_cells": 84,
+    "upstream_area_km2": 0.6964994256135993,
+    "by_height": {
+     "100.0": {
+      "volume_Mm3": 1.6417486460891986,
+      "area_km2": 0.0331666393149333,
+      "backwater_km": 0.20379427817383472,
+      "truncated": true
+     },
+     "150.0": {
+      "volume_Mm3": 3.780996881902396,
+      "area_km2": 0.04974995897239995,
+      "backwater_km": 0.2882937743760257,
+      "truncated": true
+     }
+    },
+    "max_volume_Mm3": 3.780996881902396,
+    "efficiency_Mm3_per_m": 0.016417486460891986,
+    "volume_at_min_height_Mm3": 1.6417486460891986,
+    "truncated": true
+   }
+  }
+ ]
+}

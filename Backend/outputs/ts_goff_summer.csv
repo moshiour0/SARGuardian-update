@@ -1,0 +1,8 @@
+geometry,component,epoch,days_from_start,cumulative_mm,error_mm
+ASC path 98,1,2026-07-02,0,0.0,
+ASC path 98,1,2026-07-14,12,-53.839,
+ASC path 98,1,2026-07-26,24,-38.526,
+ASC path 98,1,2026-08-19,48,-49.961,
+DESC path 48,1,2026-07-11,0,0.0,
+DESC path 48,1,2026-07-23,12,-190.272,
+DESC path 48,1,2026-08-16,36,-152.992,
