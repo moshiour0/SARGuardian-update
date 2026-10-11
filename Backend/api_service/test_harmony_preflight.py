@@ -7,7 +7,7 @@ client = TestClient(main.app)
 
 SAMPLE_CAPABILITIES = {
     "conceptId": "C1234567890-ASF",
-    "shortName": "NISAR_L2_PR_GUNW",
+    "shortName": "NISAR_L2_GUNW_PROVISIONAL_V1",
     "summary": {"variableSubset": True, "bboxSubset": False, "shapeSubset": False},
     "services": [
         {
@@ -90,3 +90,41 @@ def test_bad_granule_is_rejected_before_harmony_lookup(monkeypatch):
     )
     assert response.status_code == 422
     assert called["value"] is False
+
+
+def test_official_collection_short_name_does_not_reuse_granule_processing_type():
+    assert harmony_preflight._collection_short_name("GUNW", "PR") == "NISAR_L2_GUNW_PROVISIONAL_V1"
+    assert harmony_preflight._collection_short_name("GOFF", "UR") == "NISAR_L2_GOFF_PROVISIONAL_V1"
+    assert harmony_preflight._collection_short_name("GUNW", "PR", "BETA") == "NISAR_L2_GUNW_BETA_V1"
+
+
+def test_capability_request_uses_official_short_name_and_separates_maturity(monkeypatch):
+    captured = {}
+    def fake_http_json(url):
+        captured["url"] = url
+        return SAMPLE_CAPABILITIES
+    monkeypatch.setattr(harmony_preflight, "_http_json", fake_http_json)
+    harmony_preflight._cached_capabilities.cache_clear()
+    payload = harmony_preflight.get_harmony_capabilities("GUNW", "PR", "PROVISIONAL")
+    from urllib.parse import parse_qs, urlparse
+    assert parse_qs(urlparse(captured["url"]).query)["shortName"] == ["NISAR_L2_GUNW_PROVISIONAL_V1"]
+    assert payload["collection"]["maturity_requested"] == "PROVISIONAL"
+    assert payload["collection"]["granule_processing_type"] == "PR"
+
+
+def test_http_404_explains_collection_name_issue(monkeypatch):
+    import io
+    import urllib.error
+    def fail_open(*args, **kwargs):
+        raise urllib.error.HTTPError(
+            url="https://harmony.earthdata.nasa.gov/capabilities", code=404,
+            msg="Not Found", hdrs=None, fp=io.BytesIO(b"not found")
+        )
+    monkeypatch.setattr(harmony_preflight.urllib.request, "urlopen", fail_open)
+    try:
+        harmony_preflight._http_json("https://harmony.earthdata.nasa.gov/capabilities?shortName=NISAR_L2_GUNW_PROVISIONAL_V1")
+    except harmony_preflight.HarmonyLookupError as exc:
+        assert "HTTP 404" in str(exc)
+        assert "NISAR_L2_GUNW_PROVISIONAL_V1" in str(exc)
+    else:
+        raise AssertionError("Expected HarmonyLookupError")

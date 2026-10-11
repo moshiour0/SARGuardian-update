@@ -34,9 +34,30 @@ class HarmonyLookupError(RuntimeError):
     """Harmony capability lookup failed or returned an unusable response."""
 
 
-def _collection_short_name(product_type: str, production: str) -> str:
-    env_key = f"HARMONY_{product_type}_{production}_SHORT_NAME"
-    return os.getenv(env_key, f"NISAR_L2_{production}_{product_type}").strip()
+def _collection_short_name(product_type: str, production: str, maturity: str = "PROVISIONAL") -> str:
+    """Return the CMR collection short name, not the granule processing-type prefix.
+
+    NISAR granule names use PR/UR/OD for processing type (Production,
+    Urgent Response, Science On-Demand). Harmony's collection short names use
+    product maturity names such as *_PROVISIONAL_V1 and *_BETA_V1 instead.
+    These are different concepts and must not be conflated.
+    """
+    maturity = maturity.upper().strip()
+    if maturity not in {"PROVISIONAL", "BETA"}:
+        raise ValueError("maturity must be PROVISIONAL or BETA")
+    env_key = f"HARMONY_{product_type}_{maturity}_SHORT_NAME"
+    default_name = f"NISAR_L2_{product_type}_{maturity}_V1"
+    override = os.getenv(env_key, "").strip()
+    if override:
+        return override
+    # Backward compatibility: respect a deliberate older custom override, but
+    # never synthesize the invalid NISAR_L2_PR_GUNW-style value by default.
+    legacy_key = f"HARMONY_{product_type}_{production}_SHORT_NAME"
+    legacy_override = os.getenv(legacy_key, "").strip()
+    old_invalid_default = f"NISAR_L2_{production}_{product_type}"
+    if legacy_override and legacy_override != old_invalid_default:
+        return legacy_override
+    return default_name
 
 
 def _http_json(url: str) -> dict[str, Any]:
@@ -44,9 +65,30 @@ def _http_json(url: str) -> dict[str, Any]:
     try:
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_SECONDS) as response:
             data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # The most common configuration failure is querying a non-existent
+        # collection short name. Keep the error useful without returning an
+        # arbitrary HTML response body to the public API caller.
+        if exc.code in {400, 404, 422}:
+            message = (
+                f"NASA Harmony rejected the collection capability request (HTTP {exc.code}). "
+                "Check the collection short name and maturity; expected NISAR names are "
+                "NISAR_L2_GUNW_PROVISIONAL_V1 / NISAR_L2_GUNW_BETA_V1 "
+                "or the corresponding GOFF names. No satellite data was downloaded."
+            )
+        else:
+            message = f"NASA Harmony returned HTTP {exc.code} for the capabilities request. No satellite data was downloaded."
+        raise HarmonyLookupError(message) from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        cause = getattr(exc, "reason", None)
+        if isinstance(cause, TimeoutError) or isinstance(exc, TimeoutError):
+            reason = "request timed out"
+        elif isinstance(cause, OSError):
+            reason = "network or DNS connection failed"
+        else:
+            reason = "network request or JSON response failed"
         raise HarmonyLookupError(
-            "Could not query NASA Harmony capabilities. Retry later; no satellite data was downloaded."
+            f"Could not query NASA Harmony capabilities ({reason}). Check service availability and retry; no satellite data was downloaded."
         ) from exc
     if not isinstance(data, dict):
         raise HarmonyLookupError("NASA Harmony returned an unexpected capabilities response.")
@@ -145,8 +187,8 @@ def _cached_capabilities(short_name: str) -> dict[str, Any]:
     return payload
 
 
-def get_harmony_capabilities(product_type: str, production: str = "PR") -> dict[str, Any]:
-    short_name = _collection_short_name(product_type, production)
+def get_harmony_capabilities(product_type: str, production: str = "PR", maturity: str = "PROVISIONAL") -> dict[str, Any]:
+    short_name = _collection_short_name(product_type, production, maturity)
     payload = _cached_capabilities(short_name)
     variables_node = payload.get("variables", [])
     variables = _normalize_variables(_extract_variable_values(variables_node))
@@ -183,6 +225,8 @@ def get_harmony_capabilities(product_type: str, production: str = "PR") -> dict[
         "scientific_analysis_performed": False,
         "collection": {
             "short_name_requested": short_name,
+            "maturity_requested": maturity.upper(),
+            "granule_processing_type": production.upper(),
             "concept_id": payload.get("conceptId") or payload.get("collectionId"),
             "short_name_returned": payload.get("shortName") or payload.get("short_name"),
         },
@@ -205,8 +249,9 @@ def get_harmony_capabilities(product_type: str, production: str = "PR") -> dict[
 def build_extraction_plan(
     *, granule_name: str, product_type: str, production: str,
     aoi_area_km2: float, coordinates: list[tuple[float, float]],
+    maturity: str = "PROVISIONAL",
 ) -> dict[str, Any]:
-    capability = get_harmony_capabilities(product_type, production)
+    capability = get_harmony_capabilities(product_type, production, maturity)
     layers = capability["scientific_layers"]
     required = ["unwrapped_phase", "coherence"]
     missing = [role for role in required if not layers.get(role)]
@@ -224,6 +269,7 @@ def build_extraction_plan(
         "granule_name": granule_name,
         "product_type": product_type,
         "production": production,
+        "collection_maturity": maturity.upper(),
         "aoi_area_km2": round(aoi_area_km2, 3),
         "collection": capability["collection"],
         "ready_for_extraction": not missing and capability["capabilities"]["variable_subset"],

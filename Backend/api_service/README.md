@@ -22,9 +22,9 @@ Open `http://localhost:8000/docs` for the API.
 
 ## Harmony capabilities endpoint
 
-`GET /api/harmony/capabilities?product_type=GUNW&production=PR`
+`GET /api/harmony/capabilities?product_type=GUNW&production=PR&maturity=PROVISIONAL`
 
-Also supported: `product_type=GOFF`, or `production=UR` if the corresponding collection exists and is configured. Collection short names can be overridden using `HARMONY_GUNW_PR_SHORT_NAME`, `HARMONY_GUNW_UR_SHORT_NAME`, `HARMONY_GOFF_PR_SHORT_NAME`, and `HARMONY_GOFF_UR_SHORT_NAME` environment variables. The endpoint uses the default short name pattern only to discover capabilities; the returned collection ID and layer names are what must be validated before extraction is implemented.
+`production` describes the granule processing type (PR=Production, UR=Urgent Response, OD=Science On-Demand); it is **not** the CMR collection short-name family. `maturity` selects the official collection family `PROVISIONAL` or `BETA`. Official default short names are `NISAR_L2_GUNW_PROVISIONAL_V1`, `NISAR_L2_GUNW_BETA_V1`, `NISAR_L2_GOFF_PROVISIONAL_V1`, and `NISAR_L2_GOFF_BETA_V1`. Use `maturity=BETA` for a Beta collection. These names are based on the ASF NISAR data guide. Collection short names can be explicitly overridden using `HARMONY_GUNW_PROVISIONAL_SHORT_NAME`, `HARMONY_GUNW_BETA_SHORT_NAME`, `HARMONY_GOFF_PROVISIONAL_SHORT_NAME`, or `HARMONY_GOFF_BETA_SHORT_NAME`.
 
 The no-download planner uses the exact name returned by the ASF catalogue:
 
@@ -34,6 +34,7 @@ The no-download planner uses the exact name returned by the ASF catalogue:
 {
   "granule_name": "NISAR_L2_PR_GUNW_...",
   "product_type": "GUNW",
+  "maturity": "PROVISIONAL",
   "coordinates": [[85.45, 28.25], [85.55, 28.25], [85.55, 28.35], [85.45, 28.35]]
 }
 ```

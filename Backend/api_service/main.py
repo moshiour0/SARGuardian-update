@@ -78,6 +78,7 @@ class HarmonyPlanRequest(BaseModel):
         description="Area-of-interest coordinates as [longitude, latitude] pairs.",
     )
     product_type: str = Field(default="GUNW", description="Pilot currently supports GUNW only.")
+    maturity: str = Field(default="PROVISIONAL", description="CMR collection maturity: PROVISIONAL or BETA.")
 
 
 def _close_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -322,18 +323,25 @@ def search_catalog(search: CatalogSearchRequest, request: Request) -> dict[str, 
 
 
 @app.get("/api/harmony/capabilities")
-def harmony_capabilities(product_type: str = "GUNW", production: str = "PR") -> dict[str, Any]:
-    """Inspect current NASA Harmony support for one NISAR product collection.
+def harmony_capabilities(
+    product_type: str = "GUNW",
+    production: str = "PR",
+    maturity: str = "PROVISIONAL",
+) -> dict[str, Any]:
+    """Inspect Harmony support for an official NISAR collection short name.
 
-    This is a no-download preflight. It reports the exact layer names exposed by
-    the live capability endpoint before the next pipeline requests any data.
+    ``production`` is the granule processing type (PR/UR/OD); ``maturity`` is
+    the CMR collection family (PROVISIONAL/BETA). These must not be conflated.
+    This endpoint is metadata-only and never downloads science data.
     """
     if product_type not in {"GUNW", "GOFF"}:
         raise HTTPException(status_code=422, detail="product_type must be GUNW or GOFF.")
-    if production not in {"PR", "UR"}:
-        raise HTTPException(status_code=422, detail="production must be PR or UR.")
+    if production not in {"PR", "UR", "OD"}:
+        raise HTTPException(status_code=422, detail="production must be PR, UR, or OD.")
+    if maturity.upper() not in {"PROVISIONAL", "BETA"}:
+        raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
     try:
-        return get_harmony_capabilities(product_type, production)
+        return get_harmony_capabilities(product_type, production, maturity.upper())
     except HarmonyLookupError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -362,6 +370,8 @@ def harmony_extraction_plan(plan: HarmonyPlanRequest) -> dict[str, Any]:
             product_type="GUNW",
         )
     )
+    if plan.maturity.upper() not in {"PROVISIONAL", "BETA"}:
+        raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
     try:
         result = build_extraction_plan(
             granule_name=name,
@@ -369,6 +379,7 @@ def harmony_extraction_plan(plan: HarmonyPlanRequest) -> dict[str, Any]:
             production=match.group(1),
             aoi_area_km2=area_km2,
             coordinates=coords,
+            maturity=plan.maturity.upper(),
         )
     except HarmonyLookupError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
