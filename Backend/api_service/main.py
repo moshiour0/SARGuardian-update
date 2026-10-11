@@ -19,6 +19,8 @@ from collections import defaultdict, deque
 from datetime import date, datetime, timezone
 from typing import Any
 
+from harmony_preflight import get_harmony_capabilities, build_extraction_plan, HarmonyLookupError
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -34,11 +36,11 @@ RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ASF_HTTP_TIMEOUT_SECONDS", "35"))
 
 app = FastAPI(
-    title="SARGuardian Catalog Preflight API",
-    version="0.1.0",
+    title="SARGuardian ASF + Harmony Preflight API",
+    version="0.2.0",
     description=(
-        "Searches NISAR product metadata at ASF before any large data transfer. "
-        "This API does not download or process satellite data."
+        "Searches ASF catalogue metadata and discovers live NASA Harmony capabilities "
+        "before any data transfer. The current API does not download or process satellite data."
     ),
 )
 
@@ -66,6 +68,16 @@ class CatalogSearchRequest(BaseModel):
     start_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     product_type: str = Field(description="Exactly one product family: GUNW or GOFF.")
+
+
+
+class HarmonyPlanRequest(BaseModel):
+    granule_name: str = Field(min_length=20, max_length=300)
+    coordinates: list[tuple[float, float]] = Field(
+        min_length=3,
+        description="Area-of-interest coordinates as [longitude, latitude] pairs.",
+    )
+    product_type: str = Field(default="GUNW", description="Pilot currently supports GUNW only.")
 
 
 def _close_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -214,9 +226,13 @@ def _validate_search(search: CatalogSearchRequest) -> tuple[list[tuple[float, fl
 def health() -> dict[str, Any]:
     return {
         "status": "ok",
-        "service": "SARGuardian catalog preflight",
+        "service": "SARGuardian ASF + Harmony preflight",
         "mode": "metadata-only",
         "data_downloaded": False,
+        "scientific_analysis_performed": False,
+        "harmony_capability_discovery": True,
+        "single_granule_extraction": "not-enabled-in-this-stage",
+        "original_scientific_engine_present": True,
         "max_time_window_days": MAX_DAYS,
         "max_aoi_area_km2": MAX_AOI_AREA_KM2,
         "max_granules_per_search": MAX_GRANULES,
@@ -303,3 +319,57 @@ def search_catalog(search: CatalogSearchRequest, request: Request) -> dict[str, 
             "NISAR Level-2 products may be PROVISIONAL or have other maturity labels; verify product metadata before combining results.",
         ],
     }
+
+
+@app.get("/api/harmony/capabilities")
+def harmony_capabilities(product_type: str = "GUNW", production: str = "PR") -> dict[str, Any]:
+    """Inspect current NASA Harmony support for one NISAR product collection.
+
+    This is a no-download preflight. It reports the exact layer names exposed by
+    the live capability endpoint before the next pipeline requests any data.
+    """
+    if product_type not in {"GUNW", "GOFF"}:
+        raise HTTPException(status_code=422, detail="product_type must be GUNW or GOFF.")
+    if production not in {"PR", "UR"}:
+        raise HTTPException(status_code=422, detail="production must be PR or UR.")
+    try:
+        return get_harmony_capabilities(product_type, production)
+    except HarmonyLookupError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post("/api/harmony/plan")
+def harmony_extraction_plan(plan: HarmonyPlanRequest) -> dict[str, Any]:
+    """Build a single-granule, layer-only plan; this route does not download data."""
+    if plan.product_type != "GUNW":
+        raise HTTPException(
+            status_code=422,
+            detail="The first scientific integration pilot is GUNW only; GOFF will be added after this path is validated.",
+        )
+    name = plan.granule_name.strip()
+    match = re.match(r"^NISAR_L2_(PR|UR)_GUNW_", name)
+    if not match:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide the exact granule name of a NISAR L2 PR/UR GUNW product from the ASF results.",
+        )
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    coords, _unused_start, _unused_end, area_km2 = _validate_search(
+        CatalogSearchRequest(
+            coordinates=plan.coordinates,
+            start_date=today_utc,
+            end_date=today_utc,
+            product_type="GUNW",
+        )
+    )
+    try:
+        result = build_extraction_plan(
+            granule_name=name,
+            product_type="GUNW",
+            production=match.group(1),
+            aoi_area_km2=area_km2,
+            coordinates=coords,
+        )
+    except HarmonyLookupError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result

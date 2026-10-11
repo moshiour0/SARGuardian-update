@@ -1,70 +1,57 @@
-# SARGuardian Catalog Preflight API
+# SARGuardian ASF + Harmony Preflight API
 
-This small API is the first stage of an on-demand NISAR workflow. It searches the
-public ASF metadata catalogue for **one** product family (`GUNW` or `GOFF`) in
-a drawn area and a maximum 90-day date window. It returns product names,
-acquisition dates when parsed from the name, direction/path metadata, declared
-full-granule file sizes, and a total-size estimate.
+This API now provides two conservative preflight stages before any NISAR file is requested:
 
-**It does not download data, run raster processing, or report detected movement.**
-This boundary is deliberate: users should see how many products match and the
-raw volume estimate before any costly processing can start.
+1. `POST /api/catalog/search` — searches the public ASF catalogue and reports matching granules and any sizes ASF exposes.
+2. `GET /api/harmony/capabilities?product_type=GUNW&production=PR` — queries NASA Harmony's live collection-capabilities API and reports exact collection identifiers, service capabilities, available variables, and matches for the layer names expected by SARGuardian's original GUNW reader.
+3. `POST /api/harmony/plan` — validates one exact GUNW granule and the AOI, then returns a single-granule extraction plan based on the live capabilities.
+
+**No endpoint in this version downloads satellite data or performs scientific analysis.** That is intentional: the first step is to discover the authoritative collection and layer identifiers and check whether the Harmony service actually supports AOI subsetting. The next integration step must use those verified values to request only appropriate layers, crop/window GeoTIFFs, adapt their georeferencing, and then call the preserved original `Backend/src/gunw_reader.py`. Do not represent a plan response as an analysis result.
 
 ## Run locally
 
 ```bash
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+# Activate the virtual environment, then:
 pip install -r requirements.txt
+pip install pytest httpx
 uvicorn main:app --reload --port 8000
 ```
 
-Health check: `GET http://localhost:8000/health`
-Catalog request: `POST http://localhost:8000/api/catalog/search`
+Open `http://localhost:8000/docs` for the API.
 
-Example JSON:
+## Harmony capabilities endpoint
+
+`GET /api/harmony/capabilities?product_type=GUNW&production=PR`
+
+Also supported: `product_type=GOFF`, or `production=UR` if the corresponding collection exists and is configured. Collection short names can be overridden using `HARMONY_GUNW_PR_SHORT_NAME`, `HARMONY_GUNW_UR_SHORT_NAME`, `HARMONY_GOFF_PR_SHORT_NAME`, and `HARMONY_GOFF_UR_SHORT_NAME` environment variables. The endpoint uses the default short name pattern only to discover capabilities; the returned collection ID and layer names are what must be validated before extraction is implemented.
+
+The no-download planner uses the exact name returned by the ASF catalogue:
+
+`POST /api/harmony/plan`
 
 ```json
 {
-  "coordinates": [[85.47, 28.25], [85.55, 28.25], [85.55, 28.32], [85.47, 28.32]],
-  "start_date": "2026-07-01",
-  "end_date": "2026-09-01",
-  "product_type": "GUNW"
+  "granule_name": "NISAR_L2_PR_GUNW_...",
+  "product_type": "GUNW",
+  "coordinates": [[85.45, 28.25], [85.55, 28.25], [85.55, 28.35], [85.45, 28.35]]
 }
 ```
 
-Coordinates are `[longitude, latitude]` in WGS84. The backend closes the polygon
-if needed. The public free-demo limits default to a maximum 90-day date range,
-250 km² AOI, 25 vertices, 50 returned granules, and 6 catalogue requests per
-minute per observed client IP. Configure `FRONTEND_ORIGINS` to the exact deployed
-frontend origin before publishing. The included in-memory limiter is only a
-best-effort single-process safeguard; use platform-level rate limiting before
-opening the API to a broad audience.
+The above granule is a pattern illustration, not a valid concrete product. Use the exact complete granule name returned from a real ASF search. Coordinates are `[longitude, latitude]` pairs in WGS84. The polygon must contain at least three vertices and remain under the existing AOI cap.
 
-## Deploy on Render (metadata only)
+## Why this is not extraction yet
 
-Use `api_service` as the root directory, or use the included `render.yaml`.
-Set `FRONTEND_ORIGINS` to the frontend origin, e.g. `https://your-project.vercel.app`.
-Render's free service can spin down while idle and has an ephemeral filesystem;
-that is acceptable for this metadata-only API because it does not store product
-files. Expect a cold start after idle periods. Do not move HDF5/raster processing
-into this free web service.
+The preserved scientific reader in `../src/gunw_reader.py` expects a structured HDF5 product. Harmony's NISAR dataset extraction service can return individual 2D layers as GeoTIFFs, so a correct adapter must preserve the geotransform/CRS and deliver the matching phase, coherence, connected-component, optional mask, and ionosphere layers to the existing scientific logic. We must also discover if spatial subsetting is supported by the live service before claiming that only the drawn AOI is transferred. This version deliberately stops at live capability discovery and an extraction plan.
 
-## API response semantics
+## Free-hosting safety
 
-- `estimated_full_granule_volume_gib` sums `sizeMB` from ASF, converted to GiB.
-- This is the sum of entire source granules; it is **not** a prediction of the
-  smaller extracted variables that a future Harmony-based processing stage may use.
-- `data_downloaded` and `scientific_analysis_performed` remain `false`.
-- If results are truncated or any sizes are missing, the response states so.
+The current API remains lightweight and uses no Earthdata secret, does not create Harmony jobs, and does not store raster files. Set `FRONTEND_ORIGINS` to the exact Vercel origin before public deployment. The built-in per-process rate limiter is best-effort only.
 
 ## Tests
 
 ```bash
-pip install -r requirements.txt
-pip install pytest httpx
 pytest -q
 ```
 
-Tests stub ASF responses and do not download real satellite data.
+Tests use mocked ASF/Harmony responses. They check parsing, safety limits, ambiguous variables, and truthful no-download semantics; they do not make live NASA requests.
