@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import synth
-from gunw_reader import check_consistency, read_gunw, verify_products
+from gunw_reader import check_consistency, decode_gunw_mask, read_gunw, verify_products
 
 TOL_MM = 1.5
 
@@ -92,6 +92,22 @@ def test_coherence_comes_from_the_unwrapped_grid(tmp_path):
     assert r["coherence"].shape == r["displacement_mm"].shape
     assert float(np.median(r["coherence"])) == pytest.approx(0.9, abs=0.02), \
         "picked up the decoy's 0.99, so it read the wrapped grid"
+
+
+def test_gunw_mask_decoder_uses_low_byte_and_excludes_flagged_or_ambiguous_pixels():
+    # 11 = dry land, ref/sec subswath 1/1; 111 = water; 12 is a valid low-byte
+    # WRS code; values >= 2**24 carry bit 24 and may have a corrupted low byte
+    # due to the documented float32 geocoding issue.
+    mask = np.array([[11, 111, 12, 16777227, 16777228, 11 | (1 << 8), 11 | (1 << 16)]], dtype=np.uint32)
+    decoded = decode_gunw_mask(mask)
+    assert decoded["wrs_code"].tolist() == [[11, 111, 12, 11, 12, 11, 11]]
+    assert decoded["usable"].tolist() == [[True, False, True, False, False, False, False]]
+    assert decoded["summary"]["base_wrs_land_valid_subswath_pixels"] == 6
+    assert decoded["summary"]["reference_input_exception_nonzero_pixels"] == 1
+    assert decoded["summary"]["secondary_input_exception_nonzero_pixels"] == 1
+    assert decoded["summary"]["ionosphere_filter_flag_pixels"] == 2
+    assert decoded["summary"]["packed_wrs_decode_ambiguous_pixels"] == 2
+    assert decoded["summary"]["strict_usable_pixels"] == 2
 
 
 def test_mask_polarity_rejects_water_and_missing_subswaths(tmp_path):

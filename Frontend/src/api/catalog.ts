@@ -168,6 +168,15 @@ export type GunwQualityAnalysisResponse = {
     mean_valid?: number | null;
     unique_value_count?: number;
     most_common_values?: Array<{ value: number; count: number }>;
+    mask_encoding?: string;
+    wrs_low_byte_value_counts?: Array<{ value: number; count: number }>;
+    base_wrs_land_valid_subswath_pixels?: number;
+    strict_usable_pixels?: number;
+    reference_input_exception_nonzero_pixels?: number;
+    secondary_input_exception_nonzero_pixels?: number;
+    ionosphere_filter_flag_pixels?: number;
+    packed_wrs_decode_ambiguous_pixels?: number;
+    wrs_decode_reliable_pixels?: number;
   }>;
   warnings?: string[];
   quality_gates?: {
@@ -182,6 +191,12 @@ export type GunwQualityAnalysisResponse = {
     after_ionosphere_validity_pixels?: number;
     mask_valid_land_subswath_pixels: number;
     after_land_and_subswath_mask_pixels?: number;
+    mask_low_byte_land_valid_subswath_pixels?: number;
+    mask_reference_exception_pixels?: number;
+    mask_secondary_exception_pixels?: number;
+    mask_ionosphere_filter_flagged_pixels?: number;
+    mask_packed_wrs_ambiguous_pixels?: number;
+    after_ionosphere_filter_mask_pixels?: number;
     jointly_qualified_pixels: number;
     jointly_qualified_fraction_of_polygon: number;
     dominant_connected_component_id: number | null;

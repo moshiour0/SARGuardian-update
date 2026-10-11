@@ -1039,6 +1039,51 @@ def _layer_value_diagnostics(layer: dict[str, Any], *, role: str) -> dict[str, A
         else:
             result["unique_value_count"] = 0
             result["most_common_values"] = []
+
+    if role == "mask":
+        # GUNW mask is uint32 bit-packed. Bits 0-7 contain the WRS code;
+        # bits 8-15 and 16-23 carry secondary/reference input exception masks;
+        # bit 24 is the ionosphere filter/interpolation flag.
+        raw_u32 = np.zeros(values.shape, dtype=np.uint32)
+        if np.any(valid_inside):
+            raw_u32[valid_inside] = np.rint(values[valid_inside]).astype(np.uint32)
+        wrs = raw_u32 & np.uint32(0xFF)
+        secondary_exception = (raw_u32 >> np.uint32(8)) & np.uint32(0xFF)
+        reference_exception = (raw_u32 >> np.uint32(16)) & np.uint32(0xFF)
+        ionosphere_filter_flag = (raw_u32 & np.uint32(1 << 24)) != 0
+        # ISCE3 PR #381 documents a float32 geocoding bug where 16777227 can
+        # round to 16777228 and alter the low-byte WRS code. When packed values
+        # are >= 2**24, do not assume that the low-byte swath digit is reliable.
+        packed_wrs_ambiguous = valid_inside & (raw_u32 >= np.uint32(1 << 24))
+        water_flag = wrs // np.uint32(100)
+        ref_subswath = (wrs // np.uint32(10)) % np.uint32(10)
+        sec_subswath = wrs % np.uint32(10)
+        base_wrs_valid = (
+            valid_inside
+            & (wrs != np.uint32(255))
+            & (water_flag == 0)
+            & (ref_subswath > 0)
+            & (sec_subswath > 0)
+        )
+        result["mask_encoding"] = (
+            "uint32 bit-packed: bits 0-7 WRS code; bits 8-15 secondary input exception; "
+            "bits 16-23 reference input exception; bit 24 ionosphere filter/interpolation flag"
+        )
+        if np.any(valid_inside):
+            codes, code_counts = np.unique(wrs[valid_inside], return_counts=True)
+            order_codes = np.argsort(code_counts)[::-1][:8]
+            result["wrs_low_byte_value_counts"] = [
+                {"value": int(codes[i]), "count": int(code_counts[i])}
+                for i in order_codes
+            ]
+        else:
+            result["wrs_low_byte_value_counts"] = []
+        result["base_wrs_land_valid_subswath_pixels"] = int(base_wrs_valid.sum())
+        result["reference_input_exception_nonzero_pixels"] = int((valid_inside & (reference_exception != 0)).sum())
+        result["secondary_input_exception_nonzero_pixels"] = int((valid_inside & (secondary_exception != 0)).sum())
+        result["ionosphere_filter_flag_pixels"] = int((valid_inside & ionosphere_filter_flag).sum())
+        result["packed_wrs_decode_ambiguous_pixels"] = int(packed_wrs_ambiguous.sum())
+        result["wrs_decode_reliable_pixels"] = int((valid_inside & ~packed_wrs_ambiguous).sum())
     return result
 
 
@@ -1110,15 +1155,44 @@ def analyze_gunw_aoi_layers(
     components_pass = components_valid & (components > 0)
     iono_valid = inside & iono_layer["valid_data"] & np.isfinite(iono)
     mask_valid = inside & mask_layer["valid_data"] & np.isfinite(mask_values)
-    mask_int = np.where(mask_valid, mask_values, 255).astype(np.int64)
-    water = mask_int // 100
-    ref_subswath = (mask_int // 10) % 10
-    sec_subswath = mask_int % 10
-    mask_pass = mask_valid & (water == 0) & (ref_subswath > 0) & (sec_subswath > 0) & (mask_int != 255)
+    # GUNW mask fields are packed in a uint32. WRS is only the low byte;
+    # bit 24 is an ionosphere filtering/interpolation flag, not a water digit.
+    mask_uint32 = np.zeros(mask_values.shape, dtype=np.uint32)
+    if np.any(mask_valid):
+        mask_uint32[mask_valid] = np.rint(mask_values[mask_valid]).astype(np.uint32)
+    wrs_code = mask_uint32 & np.uint32(0xFF)
+    secondary_input_exception = (mask_uint32 >> np.uint32(8)) & np.uint32(0xFF)
+    reference_input_exception = (mask_uint32 >> np.uint32(16)) & np.uint32(0xFF)
+    ionosphere_filter_flag = (mask_uint32 & np.uint32(1 << 24)) != 0
+    # ISCE3 PR #381 documents a precision bug where float32 geocoding can
+    # round 16777227 to 16777228, changing the low-byte WRS code. We therefore
+    # exclude packed values >= 2**24 from the strict gate pending verification
+    # against the source product or polarization-specific validDataMask.
+    packed_wrs_ambiguous = mask_valid & (mask_uint32 >= np.uint32(1 << 24))
+    water = wrs_code // np.uint32(100)
+    ref_subswath = (wrs_code // np.uint32(10)) % np.uint32(10)
+    sec_subswath = wrs_code % np.uint32(10)
+    base_wrs_pass = (
+        mask_valid
+        & (wrs_code != np.uint32(255))
+        & (water == 0)
+        & (ref_subswath > 0)
+        & (sec_subswath > 0)
+    )
+    mask_pass = (
+        base_wrs_pass
+        & (reference_input_exception == 0)
+        & (secondary_input_exception == 0)
+        & ~packed_wrs_ambiguous
+    )
+    # Bit 24 means pixels masked during ionosphere filtering and filled by
+    # interpolation. Keep this as a separate strict gate and visible diagnostic.
+    ionosphere_filter_unflagged = mask_valid & ~ionosphere_filter_flag
 
-    jointly_valid = phase_valid & coherence_pass & components_pass & iono_valid & mask_pass
-    corrected_phase = phase - np.where(iono_valid, iono, 0.0)
-    corrected_phase_stats = _array_stats(corrected_phase, jointly_valid)
+    jointly_valid = (
+        phase_valid & coherence_pass & components_pass & iono_valid & mask_pass
+        & ionosphere_filter_unflagged
+    )
 
     comp_sample = components[phase_valid & coherence_pass & components_pass]
     dominant_component = None
@@ -1151,6 +1225,11 @@ def analyze_gunw_aoi_layers(
     after_components = phase_and_coherence & components_pass
     after_iono = after_components & iono_valid
     after_mask = after_iono & mask_pass
+    after_iono_filter_mask = after_mask & ionosphere_filter_unflagged
+    # This remains a phase-domain diagnostic only. It is intentionally null
+    # when no pixel survives every quality gate; it is not LOS displacement.
+    corrected_phase = phase - np.nan_to_num(iono, nan=0.0)
+    corrected_phase_stats = _array_stats(corrected_phase, jointly_valid) if np.any(jointly_valid) else None
     layer_diagnostics = {
         role: _layer_value_diagnostics(layer, role=role)
         for role, layer in layers.items()
@@ -1171,7 +1250,17 @@ def analyze_gunw_aoi_layers(
     if int(coherence_pass.sum()) > 0 and int(components_pass.sum()) == 0:
         warnings.append(
             "Coherence passes at some pixels but no connected-component IDs pass. "
-            "Verify that the extracted connectedComponents layer is correctly encoded and from the matching product/grid."
+            "Verify this layer against another GUNW granule or the original source product; do not disable the component gate."
+        )
+    mask_diag = layer_diagnostics["mask"]
+    flagged_iono_pixels = int(mask_diag.get("ionosphere_filter_flag_pixels", 0))
+    ambiguous_mask_pixels = int(mask_diag.get("packed_wrs_decode_ambiguous_pixels", 0))
+    if flagged_iono_pixels or ambiguous_mask_pixels:
+        warnings.append(
+            f"The GUNW mask has {flagged_iono_pixels} ionosphere-filter/interpolation-flagged pixel(s) and "
+            f"{ambiguous_mask_pixels} packed mask value(s) at or above 2^24. ISCE3 documents that float32 geocoding can "
+            "round 16777227 to 16777228 and alter the low-byte WRS code; those pixels are excluded from strict qualification "
+            "pending source-product or polarization-specific validDataMask verification."
         )
 
     return {
@@ -1203,8 +1292,14 @@ def analyze_gunw_aoi_layers(
             "after_connected_components_pixels": int(after_components.sum()),
             "ionosphere_phase_screen_valid_pixels": int(iono_valid.sum()),
             "after_ionosphere_validity_pixels": int(after_iono.sum()),
+            "mask_low_byte_land_valid_subswath_pixels": int(base_wrs_pass.sum()),
+            "mask_reference_exception_pixels": int((mask_valid & (reference_input_exception != 0)).sum()),
+            "mask_secondary_exception_pixels": int((mask_valid & (secondary_input_exception != 0)).sum()),
+            "mask_ionosphere_filter_flagged_pixels": int((mask_valid & ionosphere_filter_flag).sum()),
+            "mask_packed_wrs_ambiguous_pixels": int(packed_wrs_ambiguous.sum()),
             "mask_valid_land_subswath_pixels": int(mask_pass.sum()),
             "after_land_and_subswath_mask_pixels": int(after_mask.sum()),
+            "after_ionosphere_filter_mask_pixels": int(after_iono_filter_mask.sum()),
             "jointly_qualified_pixels": int(jointly_valid.sum()),
             "jointly_qualified_fraction_of_polygon": round(float(jointly_valid.sum() / max(1, int(inside.sum()))), 6),
             "dominant_connected_component_id": dominant_component,

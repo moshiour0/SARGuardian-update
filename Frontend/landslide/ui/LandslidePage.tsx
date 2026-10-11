@@ -504,8 +504,11 @@ function AoiWindowPanel({
               <div><span>Jointly qualified</span><strong>{qualityAnalysis.quality_gates.jointly_qualified_pixels}</strong></div>
               <div><span>Qualified fraction</span><strong>{(100 * qualityAnalysis.quality_gates.jointly_qualified_fraction_of_polygon).toFixed(1)}%</strong></div>
               <div><span>Coherence pass (≥ {qualityAnalysis.quality_gates.coherence_threshold})</span><strong>{qualityAnalysis.quality_gates.coherence_pass_pixels}</strong></div>
-              <div><span>Positive components</span><strong>{qualityAnalysis.quality_gates.connected_components_positive_pixels}</strong></div>
-              <div><span>Land / valid subswath</span><strong>{qualityAnalysis.quality_gates.mask_valid_land_subswath_pixels}</strong></div>
+              <div><span>Positive component IDs</span><strong>{qualityAnalysis.quality_gates.connected_components_positive_pixels}</strong></div>
+              <div><span>Base WRS land/subswath (low byte)</span><strong>{qualityAnalysis.quality_gates.mask_low_byte_land_valid_subswath_pixels ?? '—'}</strong></div>
+              <div><span>Strict mask pass (flags/exceptions excluded)</span><strong>{qualityAnalysis.quality_gates.mask_valid_land_subswath_pixels}</strong></div>
+              <div><span>Ionosphere-filter flagged</span><strong>{qualityAnalysis.quality_gates.mask_ionosphere_filter_flagged_pixels ?? '—'}</strong></div>
+              <div><span>Ambiguous packed WRS values</span><strong>{qualityAnalysis.quality_gates.mask_packed_wrs_ambiguous_pixels ?? '—'}</strong></div>
             </div>
             {qualityAnalysis.ionosphere_corrected_phase_statistics && (
               <div className="catalog-stats">
@@ -525,7 +528,8 @@ function AoiWindowPanel({
                   <div><span>Phase + coherence</span><strong>{qualityAnalysis.quality_gates.phase_and_coherence_pixels ?? '—'}</strong></div>
                   <div><span>After components</span><strong>{qualityAnalysis.quality_gates.after_connected_components_pixels ?? '—'}</strong></div>
                   <div><span>After ionosphere validity</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_validity_pixels ?? '—'}</strong></div>
-                  <div><span>After land/subswath mask</span><strong>{qualityAnalysis.quality_gates.after_land_and_subswath_mask_pixels ?? '—'}</strong></div>
+                  <div><span>After strict mask gate</span><strong>{qualityAnalysis.quality_gates.after_land_and_subswath_mask_pixels ?? '—'}</strong></div>
+                  <div><span>After ionosphere filter mask</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_filter_mask_pixels ?? '—'}</strong></div>
                 </div>
               </div>
             )}
@@ -542,13 +546,26 @@ function AoiWindowPanel({
                         <span>Valid: {diag.valid_data_pixels_in_polygon ?? '—'}</span>
                         <span>Masked/NoData: {diag.masked_or_nodata_pixels_in_polygon ?? '—'}</span>
                         <span>Zeros in AOI: {diag.zero_value_pixels_in_polygon_including_masked ?? '—'}</span>
-                        <span>Positive valid: {diag.positive_value_pixels_among_valid_data ?? '—'}</span>
+                        {role !== 'mask' && <span>{role === 'connected_components' ? 'Positive component IDs' : 'Values > 0 (sign only)'}: {diag.positive_value_pixels_among_valid_data ?? '—'}</span>}
+                        {role !== 'mask' && role !== 'connected_components' && <span>Values &lt; 0 (sign only): {diag.negative_value_pixels_among_valid_data ?? '—'}</span>}
                         <span>Min: {diag.min_valid ?? '—'}</span>
                         <span>Max: {diag.max_valid ?? '—'}</span>
                         {diag.unique_value_count !== undefined && <span>Unique values: {diag.unique_value_count}</span>}
                       </div>
                       {!!diag.most_common_values?.length && (
                         <small>Most common: {diag.most_common_values.map((item) => `${item.value} (${item.count})`).join(', ')}</small>
+                      )}
+                      {role === 'mask' && !!diag.mask_encoding && (
+                        <div className="layer-mask-decoding">
+                          <small>Encoding: {diag.mask_encoding}</small>
+                          {!!diag.wrs_low_byte_value_counts?.length && <small>WRS low-byte values: {diag.wrs_low_byte_value_counts.map((item) => `${item.value} (${item.count})`).join(', ')}</small>}
+                          <small>Base WRS land/subswath valid: {diag.base_wrs_land_valid_subswath_pixels ?? '—'}</small>
+                          <small>Reference input exceptions: {diag.reference_input_exception_nonzero_pixels ?? '—'}</small>
+                          <small>Secondary input exceptions: {diag.secondary_input_exception_nonzero_pixels ?? '—'}</small>
+                          <small>Ionosphere filter/interpolation flag: {diag.ionosphere_filter_flag_pixels ?? '—'}</small>
+                          <small>Ambiguous WRS values (≥ 2²⁴): {diag.packed_wrs_decode_ambiguous_pixels ?? '—'}</small>
+                          <small>WRS decode reliable: {diag.wrs_decode_reliable_pixels ?? '—'}</small>
+                        </div>
                       )}
                     </section>
                   ))}
