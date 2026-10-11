@@ -533,6 +533,33 @@ function AoiWindowPanel({
                 </div>
               </div>
             )}
+            {qualityAnalysis.mask_intersection_diagnostics && (
+              <div className="gate-funnel mask-intersection-panel">
+                <strong>Candidate-to-mask intersection</strong>
+                <p className="aoi-window-meta">{qualityAnalysis.mask_intersection_diagnostics.candidate_population || 'Pixels surviving earlier quality stages'}.</p>
+                <div className="catalog-stats">
+                  <div><span>Candidate pixels</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_pixels_after_ionosphere_validity ?? '—'}</strong></div>
+                  <div><span>Mask valid</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_mask_valid_pixels ?? '—'}</strong></div>
+                  <div><span>Mask invalid / NoData</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_mask_invalid_or_nodata_pixels ?? '—'}</strong></div>
+                  <div><span>Flagged candidates</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_ionosphere_flagged_pixels ?? '—'}</strong></div>
+                  <div><span>Unflagged candidates</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_ionosphere_unflagged_pixels ?? '—'}</strong></div>
+                  <div><span>Packed values ≥ 2²⁴</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_packed_values_ge_2pow24_pixels ?? '—'}</strong></div>
+                  <div><span>Base WRS pass</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_base_wrs_pass_pixels ?? '—'}</strong></div>
+                  <div><span>Reference exceptions</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_reference_exception_pixels ?? '—'}</strong></div>
+                  <div><span>Secondary exceptions</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_secondary_exception_pixels ?? '—'}</strong></div>
+                  <div><span>WRS + exceptions pass before precision quarantine</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_wrs_and_exceptions_pass_before_precision_quarantine_pixels ?? '—'}</strong></div>
+                  <div><span>Strict mask pass among candidates</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_strict_mask_pass_pixels ?? '—'}</strong></div>
+                  <div><span>Pass all mask rules among candidates</span><strong>{qualityAnalysis.mask_intersection_diagnostics.candidate_passes_all_mask_rules_pixels ?? '—'}</strong></div>
+                </div>
+                {!!qualityAnalysis.mask_intersection_diagnostics.candidate_raw_mask_value_counts_top10?.length && (
+                  <small>Candidate raw mask values: {qualityAnalysis.mask_intersection_diagnostics.candidate_raw_mask_value_counts_top10.map((item) => `${item.value} (${item.count})`).join(', ')}</small>
+                )}
+                {!!qualityAnalysis.mask_intersection_diagnostics.candidate_wrs_low_byte_counts_top10?.length && (
+                  <small>Candidate WRS low-byte values: {qualityAnalysis.mask_intersection_diagnostics.candidate_wrs_low_byte_counts_top10.map((item) => `${item.value} (${item.count})`).join(', ')}</small>
+                )}
+                <p className="catalog-warning">{qualityAnalysis.mask_intersection_diagnostics.interpretation_note || 'Diagnostics only; do not relax quality gates based on these counts.'}</p>
+              </div>
+            )}
             {qualityAnalysis.layer_diagnostics && (
               <details className="layer-diagnostic-details">
                 <summary>Inspect layer values and NoData (important when zero pixels qualify)</summary>

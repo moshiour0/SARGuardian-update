@@ -1226,6 +1226,58 @@ def analyze_gunw_aoi_layers(
     after_iono = after_components & iono_valid
     after_mask = after_iono & mask_pass
     after_iono_filter_mask = after_mask & ionosphere_filter_unflagged
+
+    # Cross-tab only the pixels that survived phase/coherence/components and
+    # had a numerically valid ionosphere screen. This identifies whether the
+    # zero final count is due to flagged/interpolated mask pixels, WRS/exception
+    # rules, invalid mask samples, or the packed-integer precision quarantine.
+    # Do not loosen the quality gate based on this diagnostic.
+    candidate_mask_valid = after_iono & mask_valid
+    candidate_raw_mask_values: list[dict[str, int]] = []
+    candidate_low_byte_counts: list[dict[str, int]] = []
+    if np.any(candidate_mask_valid):
+        candidate_raw, candidate_raw_counts = np.unique(
+            mask_uint32[candidate_mask_valid], return_counts=True
+        )
+        raw_order = np.argsort(candidate_raw_counts)[::-1][:10]
+        candidate_raw_mask_values = [
+            {"value": int(candidate_raw[i]), "count": int(candidate_raw_counts[i])}
+            for i in raw_order
+        ]
+        candidate_low_bytes, candidate_low_counts = np.unique(
+            wrs_code[candidate_mask_valid], return_counts=True
+        )
+        low_order = np.argsort(candidate_low_counts)[::-1][:10]
+        candidate_low_byte_counts = [
+            {"value": int(candidate_low_bytes[i]), "count": int(candidate_low_counts[i])}
+            for i in low_order
+        ]
+
+    candidate_base_and_exceptions_pass = (
+        after_iono
+        & base_wrs_pass
+        & (reference_input_exception == 0)
+        & (secondary_input_exception == 0)
+    )
+    mask_intersection_diagnostics = {
+        "candidate_population": "pixels remaining after phase + coherence + positive components + valid ionosphere phase screen",
+        "candidate_pixels_after_ionosphere_validity": int(after_iono.sum()),
+        "candidate_mask_valid_pixels": int(candidate_mask_valid.sum()),
+        "candidate_mask_invalid_or_nodata_pixels": int((after_iono & ~mask_valid).sum()),
+        "candidate_ionosphere_flagged_pixels": int((candidate_mask_valid & ionosphere_filter_flag).sum()),
+        "candidate_ionosphere_unflagged_pixels": int((candidate_mask_valid & ~ionosphere_filter_flag).sum()),
+        "candidate_packed_values_ge_2pow24_pixels": int((candidate_mask_valid & packed_wrs_ambiguous).sum()),
+        "candidate_base_wrs_pass_pixels": int((after_iono & base_wrs_pass).sum()),
+        "candidate_reference_exception_pixels": int((candidate_mask_valid & (reference_input_exception != 0)).sum()),
+        "candidate_secondary_exception_pixels": int((candidate_mask_valid & (secondary_input_exception != 0)).sum()),
+        "candidate_wrs_and_exceptions_pass_before_precision_quarantine_pixels": int(candidate_base_and_exceptions_pass.sum()),
+        "candidate_strict_mask_pass_pixels": int((after_iono & mask_pass).sum()),
+        "candidate_passes_all_mask_rules_pixels": int((after_iono & mask_pass & ionosphere_filter_unflagged).sum()),
+        "candidate_raw_mask_value_counts_top10": candidate_raw_mask_values,
+        "candidate_wrs_low_byte_counts_top10": candidate_low_byte_counts,
+        "interpretation_note": "Cross-tab of already qualified candidate pixels only. Packed values >= 2^24 are conservatively quarantined because the low-byte WRS code may have lost precision; bit 24 flag remains checked. This diagnostic does not authorize relaxing any scientific gate.",
+    }
+
     # This remains a phase-domain diagnostic only. It is intentionally null
     # when no pixel survives every quality gate; it is not LOS displacement.
     corrected_phase = phase - np.nan_to_num(iono, nan=0.0)
@@ -1262,6 +1314,17 @@ def analyze_gunw_aoi_layers(
             "round 16777227 to 16777228 and alter the low-byte WRS code; those pixels are excluded from strict qualification "
             "pending source-product or polarization-specific validDataMask verification."
         )
+    candidate_count = int(after_iono.sum())
+    candidate_flagged_count = int(mask_intersection_diagnostics["candidate_ionosphere_flagged_pixels"])
+    if candidate_count > 0 and candidate_flagged_count == candidate_count:
+        warnings.append(
+            "Every pixel surviving the phase/coherence/components/ionosphere-validity stages overlaps an ionosphere-filter/interpolation-flagged mask value. "
+            "A zero final qualified count is therefore consistent with the current conservative mask policy; verify the native source mask before any policy change."
+        )
+    elif candidate_count > 0 and int(mask_intersection_diagnostics["candidate_passes_all_mask_rules_pixels"]) == 0:
+        warnings.append(
+            "Candidate pixels exist, but none passes the mask rules. Use mask_intersection_diagnostics to inspect the candidate pixels' mask flags, exceptions, low-byte codes, and packed values; do not bypass the mask gate."
+        )
 
     return {
         "service": "SARGuardian GUNW AOI quality-gate diagnostics",
@@ -1282,6 +1345,7 @@ def analyze_gunw_aoi_layers(
         },
         "layers": layer_stats,
         "layer_diagnostics": layer_diagnostics,
+        "mask_intersection_diagnostics": mask_intersection_diagnostics,
         "quality_gates": {
             "phase_nonzero_finite_pixels": int(phase_valid.sum()),
             "coherence_valid_pixels": int(coherence_valid.sum()),

@@ -152,6 +152,24 @@ export type GunwQualityAnalysisResponse = {
   polarization: string;
   aoi?: { window_width_px: number; window_height_px: number; window_pixels: number; polygon_pixels: number; crs: string };
   layers?: Record<string, { min: number; max: number; mean: number; std: number; count: number } | null>;
+  mask_intersection_diagnostics?: {
+    candidate_population?: string;
+    candidate_pixels_after_ionosphere_validity?: number;
+    candidate_mask_valid_pixels?: number;
+    candidate_mask_invalid_or_nodata_pixels?: number;
+    candidate_ionosphere_flagged_pixels?: number;
+    candidate_ionosphere_unflagged_pixels?: number;
+    candidate_packed_values_ge_2pow24_pixels?: number;
+    candidate_base_wrs_pass_pixels?: number;
+    candidate_reference_exception_pixels?: number;
+    candidate_secondary_exception_pixels?: number;
+    candidate_wrs_and_exceptions_pass_before_precision_quarantine_pixels?: number;
+    candidate_strict_mask_pass_pixels?: number;
+    candidate_passes_all_mask_rules_pixels?: number;
+    candidate_raw_mask_value_counts_top10?: Array<{ value: number; count: number }>;
+    candidate_wrs_low_byte_counts_top10?: Array<{ value: number; count: number }>;
+    interpretation_note?: string;
+  };
   layer_diagnostics?: Record<string, {
     dtype?: string | null;
     nodata_value?: number | null;

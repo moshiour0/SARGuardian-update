@@ -191,3 +191,43 @@ def test_all_zero_component_layer_is_reported_as_quality_gate_problem(monkeypatc
     assert result["layer_diagnostics"]["connected_components"]["min_valid"] == 0
     assert result["layer_diagnostics"]["connected_components"]["max_valid"] == 0
     assert any("not evidence that no ground movement occurred" in warning for warning in result["warnings"])
+
+
+def test_mask_intersection_diagnostic_identifies_flagged_candidates(monkeypatch):
+    """A zero final count must show which mask class removed prior-stage candidates."""
+    inside = np.ones((2, 2), dtype=bool)
+    valid = np.ones((2, 2), dtype=bool)
+    # Two unflagged safe WRS values and two ionosphere-flagged packed values.
+    # The latter remain flagged and are conservatively excluded from final qualification.
+    packed_flagged = np.uint32((1 << 24) + 11)
+    mask = np.array([[11, packed_flagged], [11, packed_flagged]], dtype=np.uint32)
+    layer_map = {
+        "unwrapped_phase": _synthetic_layer("unwrapped_phase", np.full((2, 2), 1.0), inside, valid),
+        "coherence": _synthetic_layer("coherence", np.full((2, 2), 0.9), inside, valid),
+        "connected_components": _synthetic_layer("connected_components", np.ones((2, 2), dtype=np.uint16), inside, valid),
+        "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.full((2, 2), 0.1), inside, valid),
+        "mask": _synthetic_layer("mask", mask, inside, valid),
+    }
+    layer_map["mask"]["dtype"] = "uint32"
+    monkeypatch.setattr(
+        he,
+        "_read_job_aoi_layer",
+        lambda *, job_id, granule_name, polarization, role, coordinates: layer_map[role],
+    )
+    result = he.analyze_gunw_aoi_layers(
+        granule_name=GRANULE,
+        polarization="HH",
+        coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
+        job_ids={"unwrapped_phase": "phase", "coherence": "coh", "connected_components": "comp", "ionosphere_phase_screen": "iono", "mask": "mask"},
+    )
+    diagnostic = result["mask_intersection_diagnostics"]
+    assert diagnostic["candidate_pixels_after_ionosphere_validity"] == 4
+    assert diagnostic["candidate_mask_valid_pixels"] == 4
+    assert diagnostic["candidate_ionosphere_flagged_pixels"] == 2
+    assert diagnostic["candidate_ionosphere_unflagged_pixels"] == 2
+    assert diagnostic["candidate_packed_values_ge_2pow24_pixels"] == 2
+    assert diagnostic["candidate_wrs_and_exceptions_pass_before_precision_quarantine_pixels"] == 4
+    assert diagnostic["candidate_strict_mask_pass_pixels"] == 2
+    assert diagnostic["candidate_passes_all_mask_rules_pixels"] == 2
+    assert result["quality_gates"]["jointly_qualified_pixels"] == 2
+    assert result["physical_displacement"]["computed"] is False
