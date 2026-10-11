@@ -102,3 +102,15 @@
   .quality-job-row { grid-template-columns: 1fr auto; }
   .quality-job-row code { grid-column: 1 / -1; grid-row: 2; }
 }
+
+
+/* Diagnostics used to troubleshoot zero qualified-pixel results without implying a movement finding. */
+.gate-funnel { margin-top: 10px; }
+.gate-funnel > strong { display: block; margin: 6px 0; color: #b4f1d3; font: 700 11px 'Manrope', sans-serif; }
+.layer-diagnostic-details { margin-top: 10px; padding: 9px; border: 1px solid rgba(174,216,255,.2); border-radius: 5px; background: rgba(7,18,29,.28); }
+.layer-diagnostic-details summary { cursor: pointer; color: #b4dffa; font-size: 11px; line-height: 1.5; }
+.layer-diagnostic-list { display: grid; gap: 8px; margin-top: 10px; }
+.layer-diagnostic-card { padding: 9px; border: 1px solid rgba(231,255,242,.12); border-radius: 4px; }
+.layer-diagnostic-card > strong { display: block; color: #fff; font-size: 11px; text-transform: capitalize; }
+.layer-diagnostic-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 5px 10px; margin-top: 7px; color: #b7cad8; font-size: 10px; overflow-wrap: anywhere; }
+.layer-diagnostic-card small { display: block; margin-top: 7px; color: #a9d8f7; overflow-wrap: anywhere; }

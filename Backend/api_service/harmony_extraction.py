@@ -935,6 +935,7 @@ def _read_remote_cog_aoi_array(
                     "values": values,
                     "valid_data": valid_data,
                     "inside": inside,
+                    "dtype": str(dataset.dtypes[0]),
                     "grid": {
                         "crs": str(dataset.crs),
                         "width": int(dataset.width),
@@ -987,6 +988,58 @@ def _array_stats(values: Any, valid: Any) -> dict[str, Any] | None:
         "std": float(np.std(sample)),
         "count": int(sample.size),
     }
+
+
+def _layer_value_diagnostics(layer: dict[str, Any], *, role: str) -> dict[str, Any]:
+    """Return compact value/nodata diagnostics for one AOI window.
+
+    This is particularly important for connectedComponents: a zero count can
+    mean genuinely unassigned pixels, a raster NoData encoding issue, or an
+    extraction/conversion issue. The diagnostic must distinguish these cases
+    rather than silently treating zero qualified pixels as a scientific result.
+    """
+    import numpy as np
+
+    values = np.asarray(layer["values"], dtype=np.float64)
+    inside = np.asarray(layer["inside"], dtype=bool)
+    valid_data = np.asarray(layer["valid_data"], dtype=bool) & np.isfinite(values)
+    in_poly_finite = inside & np.isfinite(values)
+    valid_inside = inside & valid_data
+    poly_values = values[inside]
+    valid_values = values[valid_inside]
+
+    result: dict[str, Any] = {
+        "dtype": layer.get("dtype"),
+        "nodata_value": layer.get("nodata"),
+        "polygon_pixels": int(inside.sum()),
+        "finite_pixels_in_polygon": int(in_poly_finite.sum()),
+        "valid_data_pixels_in_polygon": int(valid_inside.sum()),
+        "masked_or_nodata_pixels_in_polygon": int((inside & ~valid_data).sum()),
+        "zero_value_pixels_in_polygon_including_masked": int((inside & np.isfinite(values) & (values == 0)).sum()),
+        "zero_value_pixels_among_valid_data": int((valid_inside & (values == 0)).sum()),
+        "positive_value_pixels_among_valid_data": int((valid_inside & (values > 0)).sum()),
+        "negative_value_pixels_among_valid_data": int((valid_inside & (values < 0)).sum()),
+        "min_valid": float(np.min(valid_values)) if valid_values.size else None,
+        "max_valid": float(np.max(valid_values)) if valid_values.size else None,
+        "mean_valid": float(np.mean(valid_values)) if valid_values.size else None,
+    }
+
+    if role in {"connected_components", "mask"}:
+        # The AOI is bounded by MAX_WINDOW_PIXELS, so compact categorical
+        # summaries are safe; never return raster arrays to the client.
+        categorical = valid_values
+        if categorical.size:
+            unique_values, counts = np.unique(categorical.astype(np.int64), return_counts=True)
+            order = np.argsort(counts)[::-1][:8]
+            result["unique_value_count"] = int(unique_values.size)
+            result["most_common_values"] = [
+                {"value": int(unique_values[i]), "count": int(counts[i])}
+                for i in order
+            ]
+        else:
+            result["unique_value_count"] = 0
+            result["most_common_values"] = []
+    return result
 
 
 def analyze_gunw_aoi_layers(
@@ -1093,6 +1146,34 @@ def analyze_gunw_aoi_layers(
             unc["values"], unc["inside"] & unc["valid_data"] & np.isfinite(unc["values"])
         )
 
+    # Gate-by-gate counts reveal exactly where candidate pixels are rejected.
+    phase_and_coherence = phase_valid & coherence_pass
+    after_components = phase_and_coherence & components_pass
+    after_iono = after_components & iono_valid
+    after_mask = after_iono & mask_pass
+    layer_diagnostics = {
+        role: _layer_value_diagnostics(layer, role=role)
+        for role, layer in layers.items()
+    }
+    warnings: list[str] = []
+    if int(components_pass.sum()) == 0:
+        comp_diag = layer_diagnostics["connected_components"]
+        if comp_diag["valid_data_pixels_in_polygon"] == 0:
+            warnings.append(
+                "No valid connected-components values were available inside the AOI. "
+                "Inspect the layer NoData value and extraction output before applying the component gate."
+            )
+        elif comp_diag["positive_value_pixels_among_valid_data"] == 0:
+            warnings.append(
+                "Connected-components values are non-positive throughout the valid AOI pixels. "
+                "This rejects the current quality gate; it is not evidence that no ground movement occurred."
+            )
+    if int(coherence_pass.sum()) > 0 and int(components_pass.sum()) == 0:
+        warnings.append(
+            "Coherence passes at some pixels but no connected-component IDs pass. "
+            "Verify that the extracted connectedComponents layer is correctly encoded and from the matching product/grid."
+        )
+
     return {
         "service": "SARGuardian GUNW AOI quality-gate diagnostics",
         "mode": "multi-layer-aoi-quality-diagnostics",
@@ -1111,14 +1192,19 @@ def analyze_gunw_aoi_layers(
             "crs": reference["crs"],
         },
         "layers": layer_stats,
+        "layer_diagnostics": layer_diagnostics,
         "quality_gates": {
             "phase_nonzero_finite_pixels": int(phase_valid.sum()),
             "coherence_valid_pixels": int(coherence_valid.sum()),
             "coherence_threshold": coherence_threshold,
             "coherence_pass_pixels": int(coherence_pass.sum()),
+            "phase_and_coherence_pixels": int(phase_and_coherence.sum()),
             "connected_components_positive_pixels": int(components_pass.sum()),
+            "after_connected_components_pixels": int(after_components.sum()),
             "ionosphere_phase_screen_valid_pixels": int(iono_valid.sum()),
+            "after_ionosphere_validity_pixels": int(after_iono.sum()),
             "mask_valid_land_subswath_pixels": int(mask_pass.sum()),
+            "after_land_and_subswath_mask_pixels": int(after_mask.sum()),
             "jointly_qualified_pixels": int(jointly_valid.sum()),
             "jointly_qualified_fraction_of_polygon": round(float(jointly_valid.sum() / max(1, int(inside.sum()))), 6),
             "dominant_connected_component_id": dominant_component,
@@ -1126,6 +1212,7 @@ def analyze_gunw_aoi_layers(
             "distinct_positive_components_in_phase_coherence_pixels": component_count,
         },
         "ionosphere_corrected_phase_statistics": corrected_phase_stats,
+        "warnings": warnings,
         "physical_displacement": {
             "computed": False,
             "unit": None,
@@ -1144,7 +1231,7 @@ def analyze_gunw_aoi_layers(
             ],
             "note": "This is an array adapter aligned with the original reader's quality gates, not a call to its HDF5-only read_gunw function. No reference was selected and no LOS displacement was computed.",
         },
-        "warnings": [
+        "warnings": warnings + [
             "These are AOI-only diagnostics from layers of one interferometric pair, not a temporal change map.",
             "No landslide detection, prediction, or emergency warning has been performed.",
             "Layer grids were checked for exact alignment before any combined quality gate was calculated.",

@@ -152,14 +152,36 @@ export type GunwQualityAnalysisResponse = {
   polarization: string;
   aoi?: { window_width_px: number; window_height_px: number; window_pixels: number; polygon_pixels: number; crs: string };
   layers?: Record<string, { min: number; max: number; mean: number; std: number; count: number } | null>;
+  layer_diagnostics?: Record<string, {
+    dtype?: string | null;
+    nodata_value?: number | null;
+    polygon_pixels?: number;
+    finite_pixels_in_polygon?: number;
+    valid_data_pixels_in_polygon?: number;
+    masked_or_nodata_pixels_in_polygon?: number;
+    zero_value_pixels_in_polygon_including_masked?: number;
+    zero_value_pixels_among_valid_data?: number;
+    positive_value_pixels_among_valid_data?: number;
+    negative_value_pixels_among_valid_data?: number;
+    min_valid?: number | null;
+    max_valid?: number | null;
+    mean_valid?: number | null;
+    unique_value_count?: number;
+    most_common_values?: Array<{ value: number; count: number }>;
+  }>;
+  warnings?: string[];
   quality_gates?: {
     phase_nonzero_finite_pixels: number;
     coherence_valid_pixels: number;
     coherence_threshold: number;
     coherence_pass_pixels: number;
+    phase_and_coherence_pixels?: number;
     connected_components_positive_pixels: number;
+    after_connected_components_pixels?: number;
     ionosphere_phase_screen_valid_pixels: number;
+    after_ionosphere_validity_pixels?: number;
     mask_valid_land_subswath_pixels: number;
+    after_land_and_subswath_mask_pixels?: number;
     jointly_qualified_pixels: number;
     jointly_qualified_fraction_of_polygon: number;
     dominant_connected_component_id: number | null;

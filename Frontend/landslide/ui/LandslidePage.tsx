@@ -515,6 +515,46 @@ function AoiWindowPanel({
               </div>
             )}
             <p className="catalog-warning">{qualityAnalysis.physical_displacement?.reason || 'This is a quality-gated phase diagnostic, not LOS displacement or landslide detection.'}</p>
+            {qualityAnalysis.warnings?.map((warning) => (
+              <p className="catalog-warning" role="status" key={warning}>{warning}</p>
+            ))}
+            {qualityAnalysis.quality_gates && (
+              <div className="gate-funnel">
+                <strong>Pixel gate funnel</strong>
+                <div className="catalog-stats">
+                  <div><span>Phase + coherence</span><strong>{qualityAnalysis.quality_gates.phase_and_coherence_pixels ?? '—'}</strong></div>
+                  <div><span>After components</span><strong>{qualityAnalysis.quality_gates.after_connected_components_pixels ?? '—'}</strong></div>
+                  <div><span>After ionosphere validity</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_validity_pixels ?? '—'}</strong></div>
+                  <div><span>After land/subswath mask</span><strong>{qualityAnalysis.quality_gates.after_land_and_subswath_mask_pixels ?? '—'}</strong></div>
+                </div>
+              </div>
+            )}
+            {qualityAnalysis.layer_diagnostics && (
+              <details className="layer-diagnostic-details">
+                <summary>Inspect layer values and NoData (important when zero pixels qualify)</summary>
+                <div className="layer-diagnostic-list">
+                  {Object.entries(qualityAnalysis.layer_diagnostics).map(([role, diag]) => (
+                    <section className="layer-diagnostic-card" key={role}>
+                      <strong>{role.replace(/_/g, ' ')}</strong>
+                      <div className="layer-diagnostic-grid">
+                        <span>dtype: {diag.dtype || 'unknown'}</span>
+                        <span>NoData: {diag.nodata_value ?? 'not set'}</span>
+                        <span>Valid: {diag.valid_data_pixels_in_polygon ?? '—'}</span>
+                        <span>Masked/NoData: {diag.masked_or_nodata_pixels_in_polygon ?? '—'}</span>
+                        <span>Zeros in AOI: {diag.zero_value_pixels_in_polygon_including_masked ?? '—'}</span>
+                        <span>Positive valid: {diag.positive_value_pixels_among_valid_data ?? '—'}</span>
+                        <span>Min: {diag.min_valid ?? '—'}</span>
+                        <span>Max: {diag.max_valid ?? '—'}</span>
+                        {diag.unique_value_count !== undefined && <span>Unique values: {diag.unique_value_count}</span>}
+                      </div>
+                      {!!diag.most_common_values?.length && (
+                        <small>Most common: {diag.most_common_values.map((item) => `${item.value} (${item.count})`).join(', ')}</small>
+                      )}
+                    </section>
+                  ))}
+                </div>
+              </details>
+            )}
             <small className="aoi-window-meta">Full TIFF downloaded: no · Persistent raster storage: no · Original HDF5 reader invoked: {qualityAnalysis.original_scientific_engine?.hdf5_read_gunw_invoked ? 'yes' : 'no'}</small>
           </div>
         )}
