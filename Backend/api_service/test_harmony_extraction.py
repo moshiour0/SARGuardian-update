@@ -97,3 +97,35 @@ def test_inspect_harmony_result_not_ready_does_not_probe_result(monkeypatch):
 def test_inspect_result_rejects_untrusted_url():
     with pytest.raises(HarmonyJobError, match="outside the approved public result path"):
         harmony_extraction._trusted_harmony_result_url("https://example.com/a.tif")
+
+
+def test_safe_result_redirect_allows_https_aws_and_preserves_range_without_auth():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/job/file.tif",
+        headers={"Range": "bytes=0-0", "Authorization": "Bearer do-not-forward"},
+        method="GET",
+    )
+    redirected = handler.redirect_request(
+        req, None, 303, "See Other", {},
+        "https://harmony-prod-staging.s3.us-west-2.amazonaws.com/public/job/file.tif?X-Amz-Signature=fake",
+    )
+    assert redirected is not None
+    assert redirected.full_url.startswith("https://harmony-prod-staging.s3.us-west-2.amazonaws.com/")
+    assert any(k.lower() == "range" and v == "bytes=0-0" for k, v in redirected.headers.items())
+    assert not any(k.lower() == "authorization" for k in redirected.headers)
+    assert handler.followed == [{"status": 303, "host": "harmony-prod-staging.s3.us-west-2.amazonaws.com"}]
+
+
+def test_safe_result_redirect_rejects_unapproved_host_and_http():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/job/file.tif",
+        method="HEAD",
+    )
+    assert handler.redirect_request(req, None, 303, "See Other", {}, "https://example.com/file.tif") is None
+    assert handler.rejected_reason
+
+    handler2 = harmony_extraction._SafeResultRedirect()
+    assert handler2.redirect_request(req, None, 303, "See Other", {}, "http://bucket.s3.amazonaws.com/file.tif") is None
+    assert handler2.rejected_reason

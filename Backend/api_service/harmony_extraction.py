@@ -29,9 +29,51 @@ class HarmonyJobError(RuntimeError):
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Never follow a redirect into a potentially large result download."""
+    """Never follow redirects when submitting jobs or polling JSON status."""
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
         return None
+
+
+class _SafeResultRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow only HTTPS redirects from Harmony result links to approved storage hosts.
+
+    Harmony stages output in NASA-owned S3 and gives clients redirecting result URLs.
+    This handler is used only for metadata probes (HEAD or GET Range: bytes=0-0),
+    never for reading a raster body. It deliberately does not forward Authorization.
+    """
+    def __init__(self):
+        super().__init__()
+        self.followed: list[dict[str, Any]] = []
+        self.rejected_reason: str | None = None
+
+    @staticmethod
+    def _approved(url: str) -> bool:
+        parsed = urllib.parse.urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if parsed.scheme != "https" or not host or parsed.username is not None or parsed.password is not None:
+            return False
+        if parsed.port not in (None, 443):
+            return False
+        return (
+            host == "harmony.earthdata.nasa.gov"
+            or host == "amazonaws.com"
+            or host.endswith(".amazonaws.com")
+        )
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        if not self._approved(newurl):
+            self.rejected_reason = "Redirect target was outside the approved HTTPS Harmony/AWS S3 hosts; it was not contacted."
+            return None
+        parsed = urllib.parse.urlparse(newurl)
+        self.followed.append({"status": int(code), "host": (parsed.hostname or "").lower()})
+        # Keep only the Range header (for the one-byte metadata probe) and neutral
+        # negotiation headers. Do not propagate cookies, bearer tokens, or auth.
+        safe_headers = {}
+        existing = {str(k).lower(): v for k, v in req.headers.items()}
+        for name in ("User-Agent", "Accept", "Accept-Encoding", "Range"):
+            if name.lower() in existing:
+                safe_headers[name] = existing[name.lower()]
+        return urllib.request.Request(newurl, headers=safe_headers, method=req.get_method())
 
 
 def _token() -> str:
@@ -276,10 +318,11 @@ def _parse_content_range_total(value: str | None) -> int | None:
 
 
 def _inspect_result_headers(url: str) -> dict[str, Any]:
-    """Inspect result headers with HEAD, falling back to a one-byte Range probe.
+    """Inspect result headers, safely following Harmony's redirect to staged S3.
 
-    It never reads a TIFF payload. Redirects are not followed to avoid accidentally
-    transferring a large data file or making requests to unvalidated hosts.
+    First sends HEAD. If size is absent or HEAD is unsupported, sends GET with
+    Range: bytes=0-0. No response body is read or saved; if a server ignores the
+    Range header, the response is immediately closed after headers are received.
     """
     url = _trusted_harmony_result_url(url)
     headers = {
@@ -287,67 +330,73 @@ def _inspect_result_headers(url: str) -> dict[str, Any]:
         "Accept": "image/tiff, application/json;q=0.8, */*;q=0.1",
         "Accept-Encoding": "identity",
     }
+    redirect_handler = _SafeResultRedirect()
+    opener = urllib.request.build_opener(redirect_handler)
     head_status: int | None = None
     head_headers: Any = {}
+    head_error: str | None = None
     try:
         req = urllib.request.Request(url, headers=headers, method="HEAD")
-        with urllib.request.build_opener(_NoRedirect()).open(req, timeout=TIMEOUT_SECONDS) as response:
+        with opener.open(req, timeout=TIMEOUT_SECONDS) as response:
             head_status = getattr(response, "status", 200)
             head_headers = response.headers
     except urllib.error.HTTPError as exc:
         head_status = exc.code
         head_headers = exc.headers or {}
-        # A 405/501 may mean HEAD is not supported. Probe only one byte via Range.
         if exc.code not in {405, 501}:
-            return {
-                "http_status": exc.code,
-                "content_length_bytes": None,
-                "content_range_total_bytes": None,
-                "content_type": head_headers.get("Content-Type"),
-                "accept_ranges": head_headers.get("Accept-Ranges"),
-                "last_modified": head_headers.get("Last-Modified"),
-                "size_known": False,
-                "note": "HEAD request did not provide result metadata; no raster bytes were read.",
-            }
+            location = head_headers.get("Location")
+            if location and redirect_handler.rejected_reason:
+                head_error = redirect_handler.rejected_reason
+            elif exc.code in {301, 302, 303, 307, 308}:
+                head_error = "Harmony result URL redirected, but its destination could not be safely followed."
+            elif exc.code >= 400:
+                head_error = f"HEAD request returned HTTP {exc.code}."
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise HarmonyJobError("Could not inspect Harmony result headers because of a network/timeout error. No TIFF bytes were downloaded.") from exc
+        raise HarmonyJobError("Could not inspect Harmony result headers because of a network/timeout error. No TIFF body was read.") from exc
 
-    total = None
-    try:
-        raw_length = head_headers.get("Content-Length")
-        if raw_length is not None:
-            length = int(raw_length)
-            if length >= 0:
-                total = length
-    except (TypeError, ValueError):
-        total = None
+    def _header_length(h: Any) -> int | None:
+        raw = h.get("Content-Length") if h is not None else None
+        if raw is None:
+            return None
+        try:
+            num = int(raw)
+            return num if num >= 0 else None
+        except (TypeError, ValueError):
+            return None
 
-    range_total = _parse_content_range_total(head_headers.get("Content-Range"))
+    # A refused redirect exposes the small text/plain redirect/error response's
+    # Content-Length, not the TIFF object's size. Never treat it as result size.
+    redirect_statuses = {301, 302, 303, 307, 308}
+    refused_redirect = head_status in redirect_statuses and not redirect_handler.followed
+    total = None if refused_redirect else _header_length(head_headers)
+    range_total = None if refused_redirect else _parse_content_range_total(head_headers.get("Content-Range") if head_headers is not None else None)
     probe_status: int | None = None
-    # Only probe if HEAD didn't reveal size and HEAD was unsupported; Range asks for a single byte.
-    if total is None and head_status in {405, 501}:
+    probe_headers: Any = {}
+    # HEAD often redirects to a signed S3 URL or lacks Content-Length. Try a
+    # minimal Range probe whenever safely possible and size remains unknown.
+    should_probe = total is None and not refused_redirect and (head_status in {200, 206, 405, 501} or bool(redirect_handler.followed))
+    if should_probe and not head_error:
+        probe_redirect_handler = _SafeResultRedirect()
+        probe_opener = urllib.request.build_opener(probe_redirect_handler)
         range_headers = dict(headers)
         range_headers["Range"] = "bytes=0-0"
         try:
             req = urllib.request.Request(url, headers=range_headers, method="GET")
-            with urllib.request.build_opener(_NoRedirect()).open(req, timeout=TIMEOUT_SECONDS) as response:
+            with probe_opener.open(req, timeout=TIMEOUT_SECONDS) as response:
                 probe_status = getattr(response, "status", 200)
-                range_total = _parse_content_range_total(response.headers.get("Content-Range"))
-                try:
-                    raw_length = response.headers.get("Content-Length")
-                    if range_total is None and raw_length is not None:
-                        # Content-Length for a 206 response is the one-byte response, not total size.
-                        if probe_status == 200:
-                            length = int(raw_length)
-                            if length >= 0:
-                                total = length
-                except (TypeError, ValueError):
-                    pass
-                # Intentionally do not call response.read(): closing a response prevents
-                # reading the raster body even if the server ignores the Range header.
+                probe_headers = response.headers
+                range_total = _parse_content_range_total(probe_headers.get("Content-Range")) or range_total
+                # For a 206 response Content-Length refers to the one-byte segment;
+                # only treat it as the full object size for a 200 response.
+                if total is None and probe_status == 200:
+                    total = _header_length(probe_headers)
+                redirect_handler.followed.extend(probe_redirect_handler.followed)
         except urllib.error.HTTPError as exc:
             probe_status = exc.code
-            range_total = _parse_content_range_total((exc.headers or {}).get("Content-Range"))
+            probe_headers = exc.headers or {}
+            range_total = _parse_content_range_total(probe_headers.get("Content-Range")) or range_total
+            if probe_redirect_handler.rejected_reason:
+                head_error = probe_redirect_handler.rejected_reason
         except (urllib.error.URLError, TimeoutError, OSError):
             probe_status = None
 
@@ -355,20 +404,25 @@ def _inspect_result_headers(url: str) -> dict[str, Any]:
         total = range_total
     size_mb = round(total / (1024 * 1024), 3) if total is not None else None
     size_gib = round(total / (1024 * 1024 * 1024), 4) if total is not None else None
-    content_type = head_headers.get("Content-Type")
+    final_headers = probe_headers if probe_status in {200, 206} and (_header_length(head_headers) is None or refused_redirect) else head_headers
+    content_type = final_headers.get("Content-Type") if final_headers is not None else None
+    note = "Metadata headers only; no raster body was read or stored."
+    if total is None:
+        note = head_error or "The redirect was followed when approved, but the storage response did not expose an object size via Content-Length or Content-Range. No raster body was read."
     return {
         "http_status": head_status,
         "range_probe_status": probe_status,
+        "redirects_followed": redirect_handler.followed,
         "content_length_bytes": total,
         "content_length_mb": size_mb,
         "content_length_gib": size_gib,
         "content_range_total_bytes": range_total,
         "content_type": content_type,
-        "accept_ranges": head_headers.get("Accept-Ranges"),
-        "last_modified": head_headers.get("Last-Modified"),
+        "accept_ranges": final_headers.get("Accept-Ranges") if final_headers is not None else None,
+        "last_modified": final_headers.get("Last-Modified") if final_headers is not None else None,
         "size_known": total is not None,
         "is_geotiff_like": "tiff" in str(content_type or "").lower(),
-        "note": "Headers only; SARGuardian did not download or store raster data.",
+        "note": note,
     }
 
 
