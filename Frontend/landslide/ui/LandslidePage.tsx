@@ -407,11 +407,26 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const today = new Date().toISOString().slice(0, 10);
   const timestamp: TimestampSelection = { mode: 'window', start: windowStart, end: windowEnd };
   const polygon: InvestigationPolyline = { type: 'LineString', coordinates: areaClosed && coordinates.length > 2 ? [...coordinates, coordinates[0]] : coordinates, crs: 'EPSG:4326' };
-  const ready = Boolean(location && areaClosed && coordinates.length >= 3 && windowStart && windowEnd && windowEnd >= windowStart && windowEnd <= today);
   const windowDays = windowStart && windowEnd ? Math.ceil((Date.parse(`${windowEnd}T00:00:00Z`) - Date.parse(`${windowStart}T00:00:00Z`)) / 86400000) : 0;
-  const geometryStatus = !location ? 'Search a place to begin.' : !coordinates.length ? 'Draw an area to investigate.' : !areaClosed ? 'Close the polygon to continue.' : 'Choose an observation time.';
   const polygonAreaKm2 = coordinates.length > 2 ? calculateGeodesicAreaKm2(coordinates) : 0;
-  const catalogEligible = ready && windowDays >= 0 && windowDays <= 90 && polygonAreaKm2 <= 250;
+  // The AOI polygon itself is sufficient for catalogue search. Place search is optional;
+  // if no named place was selected, the reference demo can use the polygon centre.
+  const ready = Boolean(areaClosed && coordinates.length >= 3 && windowStart && windowEnd && windowEnd >= windowStart && windowEnd <= today);
+  const geometryStatus = !coordinates.length
+    ? (location ? 'Draw an area to investigate.' : 'Search a place or draw an area to begin.')
+    : !areaClosed ? 'Add at least 3 vertices, then close the area.'
+      : !windowStart || !windowEnd ? 'Choose an observation time.'
+        : windowEnd < windowStart ? 'End date must be on or after the start date.'
+          : windowEnd > today ? 'End date cannot be in the future.'
+            : ready ? (location ? 'Area and time window ready.' : 'Area ready — using its centre point.')
+              : 'Complete the required fields.';
+  const catalogEligible = ready && windowDays >= 0 && windowDays <= 90 && polygonAreaKm2 > 0.001 && polygonAreaKm2 <= 250;
+  const catalogDisabledReason = !ready
+    ? geometryStatus
+    : windowDays > 90 ? 'Archive search is limited to 90 days; shorten the time window.'
+      : polygonAreaKm2 <= 0.001 ? 'Draw a larger, valid polygon with at least 3 vertices.'
+        : polygonAreaKm2 > 250 ? `Selected area is ${polygonAreaKm2.toFixed(1)} km². Archive search is limited to 250 km²; reduce the polygon.`
+          : '';
 
   const handleMapReady = useCallback((map: google.maps.Map) => { mapRef.current = map; }, []);
 
@@ -565,16 +580,20 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   };
 
   const runInvestigation = () => {
-    if (!location) {
-      setError('Search and select a location before investigating.');
-      return;
-    }
     if (!areaClosed || coordinates.length < 3) {
-      setError('Close the polygon before investigating.');
+      setError('Draw at least three vertices and press Close area before investigating.');
       return;
     }
 
-    const request: AnalysisRequest = { location, polyline: polygon, timestamp: timestampToRequest(timestamp) };
+    // A polygon is a complete spatial selection by itself. Use its centre only as
+    // contextual metadata when the user did not choose a named place in search.
+    const analysisLocation: LocationSelection = location ?? {
+      searchText: 'Selected area centre',
+      name: 'Selected area centre',
+      latitude: coordinates.reduce((sum, point) => sum + point[1], 0) / coordinates.length,
+      longitude: coordinates.reduce((sum, point) => sum + point[0], 0) / coordinates.length,
+    };
+    const request: AnalysisRequest = { location: analysisLocation, polyline: polygon, timestamp: timestampToRequest(timestamp) };
     const validation = validateAnalysisRequest(request);
     if (!validation.valid) {
       setError(validation.errors.join(' '));
@@ -674,7 +693,7 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
             <>
               <div className="action-copy">
                 <span className="action-status"><i />{geometryStatus}</span>
-                {location && <strong>{location.name}</strong>}
+                {location ? <strong>{location.name}</strong> : coordinates.length > 2 ? <strong>Selected area · {polygonAreaKm2.toFixed(2)} km²</strong> : null}
               </div>
 
               <div className="draw-actions">
@@ -715,6 +734,7 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
               <div className="action-buttons">
                 <button className="investigate-button" type="button" disabled={!catalogEligible || isCatalogLoading} onClick={runCatalogPreflight}>{isCatalogLoading ? 'Checking ASF...' : 'Check NISAR archive'}</button>
                 <button className="demo-button" type="button" disabled={!ready || isProcessing} onClick={runInvestigation}>{isProcessing ? 'Preparing demo...' : 'Reference demo'}</button>
+                {!catalogEligible && <p className="action-hint" role="status">{catalogDisabledReason}</p>}
               </div>
               {catalogResult && <CatalogPreflightPanel result={catalogResult} onClose={() => setCatalogResult(null)} />}
               {catalogError && <p className="catalog-error" role="alert">{catalogError}</p>}

@@ -19,6 +19,8 @@
 
 /* Metadata-only NISAR archive preflight. No raster data is downloaded here. */
 .action-buttons { display: grid; gap: 6px; min-width: 148px; }
+
+.action-hint { grid-column: 1 / -1; margin: 0; color: #ffdf9a; font-size: 10px; line-height: 1.4; }
 .action-buttons .investigate-button { width: 100%; min-width: 148px; min-height: 38px; padding: 7px 10px; }
 .demo-button { min-height: 32px; padding: 6px 10px; border: 1px solid rgba(174,216,255,.40); border-radius: 4px; background: rgba(5,45,57,.55); color: #d8efff; cursor: pointer; font: 700 10px 'Manrope', sans-serif; }
 .demo-button:disabled { opacity: .45; cursor: not-allowed; }
