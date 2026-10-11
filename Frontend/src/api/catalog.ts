@@ -191,7 +191,6 @@ export type GunwQualityAnalysisResponse = {
   ionosphere_corrected_phase_statistics?: { min: number; max: number; mean: number; std: number; count: number } | null;
   physical_displacement?: { computed: boolean; unit: string | null; reason: string };
   original_scientific_engine?: { hdf5_read_gunw_invoked: boolean; reader_compatible_core_gates_applied_to_aligned_aoi_arrays: boolean; note: string };
-  warnings?: string[];
   detail?: string;
 };
 
