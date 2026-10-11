@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
 import type { User } from 'firebase/auth';
-import { inspectNisarAoiWindow, searchNisarCatalog } from '../../src/api/catalog';
-import type { AoiWindowResponse, CatalogResponse, NisarProductType } from '../../src/api/catalog';
+import { analyzeGunwAoiQuality, getNisarHarmonyJobStatus, inspectNisarAoiWindow, searchNisarCatalog, startGunwQualityLayers } from '../../src/api/catalog';
+import type { AoiWindowResponse, CatalogResponse, GunwQualityAnalysisResponse, HarmonyQualityLayerBundle, NisarProductType } from '../../src/api/catalog';
 import { investigate } from '../engine/adapter';
 import { calculateGeodesicAreaKm2, timestampToRequest, validateAnalysisRequest, validatePolyline } from '../engine/validation';
 import type { AnalysisRequest, Coordinate, InvestigationPolyline, InvestigationResult, LocationSelection, TimestampSelection } from '../engine/types';
@@ -374,6 +374,19 @@ function AoiWindowPanel({
   error,
   result,
   onRun,
+  granuleName,
+  onGranuleNameChange,
+  qualityBundle,
+  qualityStatuses,
+  qualityMessage,
+  qualityError,
+  qualityStartLoading,
+  qualityCheckLoading,
+  qualityAnalyzeLoading,
+  qualityAnalysis,
+  onStartQualityLayers,
+  onCheckQualityLayers,
+  onAnalyzeQuality,
 }: {
   coordinates: Coordinate[];
   areaClosed: boolean;
@@ -383,7 +396,24 @@ function AoiWindowPanel({
   error: string;
   result: AoiWindowResponse | null;
   onRun: () => void;
+  granuleName: string;
+  onGranuleNameChange: (value: string) => void;
+  qualityBundle: HarmonyQualityLayerBundle | null;
+  qualityStatuses: Record<string, string>;
+  qualityMessage: string;
+  qualityError: string;
+  qualityStartLoading: boolean;
+  qualityCheckLoading: boolean;
+  qualityAnalyzeLoading: boolean;
+  qualityAnalysis: GunwQualityAnalysisResponse | null;
+  onStartQualityLayers: () => void;
+  onCheckQualityLayers: () => void;
+  onAnalyzeQuality: () => void;
 }) {
+  const requiredQualityRoles = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
+  const qualityRolesToCheck = [...requiredQualityRoles, ...(qualityBundle?.jobs.ionosphere_phase_screen_uncertainty ? ['ionosphere_phase_screen_uncertainty'] : [])];
+  const canAnalyzeQuality = Boolean(qualityBundle?.all_required_layers_submitted)
+    && qualityRolesToCheck.every((role) => ['successful', 'completed', 'complete'].includes((qualityStatuses[role] || qualityBundle?.jobs[role]?.status) || ''));
   return (
     <div className="aoi-window-panel" aria-live="polite">
       <div className="catalog-preflight-heading">
@@ -427,6 +457,68 @@ function AoiWindowPanel({
           <small className="aoi-window-meta">CRS: {result.source_crs || 'unknown'} · Persistent storage: {result.persistent_storage_used ? 'used' : 'not used'} · Full raster downloaded: {result.full_raster_downloaded ? 'yes' : 'no'}</small>
         </div>
       )}
+      <div className="quality-layer-section">
+        <span className="result-kicker">NEXT · MULTI-LAYER QUALITY CHECK</span>
+        <p className="catalog-notice">Reuse the completed phase job and request matching coherence, connected-components, ionosphere-screen, and GUNW mask layers. Harmony stages full-granule layer outputs; SARGuardian reads only the selected AOI window and does not save TIFF files.</p>
+        <label className="aoi-job-label">
+          <span>Exact granule name for this phase job</span>
+          <input
+            value={granuleName}
+            onChange={(event) => onGranuleNameChange(event.target.value)}
+            placeholder="Paste the exact GUNW granule name from ASF"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <button className="investigate-button aoi-window-button" type="button" disabled={!areaClosed || coordinates.length < 3 || !jobId.trim() || !granuleName.trim() || qualityStartLoading} onClick={onStartQualityLayers}>
+          {qualityStartLoading ? 'Submitting quality layers…' : 'Start companion quality-layer jobs'}
+        </button>
+        {qualityError && <p className="catalog-error" role="alert">{qualityError}</p>}
+        {qualityMessage && <p className="action-hint" role="status">{qualityMessage}</p>}
+        {qualityBundle && (
+          <div className="quality-job-list">
+            <strong>Harmony layer jobs</strong>
+            {Object.entries(qualityBundle.jobs).map(([role, job]) => (
+              <div className="quality-job-row" key={role}>
+                <span>{role.replace(/_/g, ' ')}</span>
+                <code>{job.job_id}</code>
+                <b>{qualityStatuses[role] || job.status}</b>
+              </div>
+            ))}
+            {Object.entries(qualityBundle.submission_errors || {}).map(([role, message]) => (
+              <p className="catalog-warning" key={role}>{role}: {message}</p>
+            ))}
+            <button type="button" className="demo-button quality-action-button" disabled={qualityCheckLoading} onClick={onCheckQualityLayers}>
+              {qualityCheckLoading ? 'Checking jobs…' : 'Check all layer jobs'}
+            </button>
+            <button type="button" className="investigate-button quality-action-button" disabled={!canAnalyzeQuality || qualityAnalyzeLoading} onClick={onAnalyzeQuality}>
+              {qualityAnalyzeLoading ? 'Analyzing AOI quality…' : 'Analyze aligned AOI quality gates'}
+            </button>
+          </div>
+        )}
+        {qualityAnalysis?.quality_gates && (
+          <div className="aoi-window-result">
+            <strong>Multi-layer AOI quality diagnostics</strong>
+            <div className="catalog-stats">
+              <div><span>Polygon pixels</span><strong>{qualityAnalysis.aoi?.polygon_pixels ?? '—'}</strong></div>
+              <div><span>Jointly qualified</span><strong>{qualityAnalysis.quality_gates.jointly_qualified_pixels}</strong></div>
+              <div><span>Qualified fraction</span><strong>{(100 * qualityAnalysis.quality_gates.jointly_qualified_fraction_of_polygon).toFixed(1)}%</strong></div>
+              <div><span>Coherence pass (≥ {qualityAnalysis.quality_gates.coherence_threshold})</span><strong>{qualityAnalysis.quality_gates.coherence_pass_pixels}</strong></div>
+              <div><span>Positive components</span><strong>{qualityAnalysis.quality_gates.connected_components_positive_pixels}</strong></div>
+              <div><span>Land / valid subswath</span><strong>{qualityAnalysis.quality_gates.mask_valid_land_subswath_pixels}</strong></div>
+            </div>
+            {qualityAnalysis.ionosphere_corrected_phase_statistics && (
+              <div className="catalog-stats">
+                <div><span>Corrected phase mean (rad)</span><strong>{qualityAnalysis.ionosphere_corrected_phase_statistics.mean.toFixed(4)}</strong></div>
+                <div><span>Corrected phase std (rad)</span><strong>{qualityAnalysis.ionosphere_corrected_phase_statistics.std.toFixed(4)}</strong></div>
+                <div><span>Pixels after all gates</span><strong>{qualityAnalysis.ionosphere_corrected_phase_statistics.count}</strong></div>
+              </div>
+            )}
+            <p className="catalog-warning">{qualityAnalysis.physical_displacement?.reason || 'This is a quality-gated phase diagnostic, not LOS displacement or landslide detection.'}</p>
+            <small className="aoi-window-meta">Full TIFF downloaded: no · Persistent raster storage: no · Original HDF5 reader invoked: {qualityAnalysis.original_scientific_engine?.hdf5_read_gunw_invoked ? 'yes' : 'no'}</small>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -455,6 +547,15 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const [aoiWindowResult, setAoiWindowResult] = useState<AoiWindowResponse | null>(null);
   const [isAoiWindowLoading, setIsAoiWindowLoading] = useState(false);
   const [aoiWindowError, setAoiWindowError] = useState('');
+  const [qualityGranuleName, setQualityGranuleName] = useState('');
+  const [qualityBundle, setQualityBundle] = useState<HarmonyQualityLayerBundle | null>(null);
+  const [qualityStatuses, setQualityStatuses] = useState<Record<string, string>>({});
+  const [qualityMessage, setQualityMessage] = useState('');
+  const [qualityError, setQualityError] = useState('');
+  const [isQualityStarting, setIsQualityStarting] = useState(false);
+  const [isQualityChecking, setIsQualityChecking] = useState(false);
+  const [isQualityAnalyzing, setIsQualityAnalyzing] = useState(false);
+  const [qualityAnalysis, setQualityAnalysis] = useState<GunwQualityAnalysisResponse | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
 
   useEffect(() => {
@@ -548,6 +649,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setCatalogError('');
     setAoiWindowResult(null);
     setAoiWindowError('');
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
   };
 
   const handleWindowEndChange = (value: string) => {
@@ -557,6 +661,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setCatalogError('');
     setAoiWindowResult(null);
     setAoiWindowError('');
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
     if (windowStart && value < windowStart) setError('Ending date cannot be before starting date.');
     else if (value > today) setError('Ending date cannot be after today.');
     else setError('');
@@ -571,6 +678,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setCatalogError('');
     setAoiWindowResult(null);
     setAoiWindowError('');
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
     setError('');
   };
 
@@ -584,6 +694,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setCatalogError('');
     setAoiWindowResult(null);
     setAoiWindowError('');
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
     setError('');
   };
 
@@ -598,6 +711,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setCatalogResult(null);
     setAoiWindowResult(null);
     setAoiWindowError('');
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
   };
 
   const clearGeometry = () => {
@@ -685,6 +801,93 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
       setAoiWindowError(error instanceof Error ? error.message : 'Could not read the selected AOI window.');
     } finally {
       setIsAoiWindowLoading(false);
+    }
+  };
+
+  const startQualityLayers = async () => {
+    if (!areaClosed || coordinates.length < 3) {
+      setQualityError('Close the polygon before starting quality-layer jobs.');
+      return;
+    }
+    if (!harmonyJobId.trim() || !qualityGranuleName.trim()) {
+      setQualityError('Enter the successful phase Job ID and the exact GUNW granule name used by that job.');
+      return;
+    }
+    setQualityError('');
+    setQualityMessage('Submitting companion layers to NASA Harmony…');
+    setQualityAnalysis(null);
+    setQualityBundle(null);
+    setQualityStatuses({});
+    setIsQualityStarting(true);
+    try {
+      const response = await startGunwQualityLayers({
+        granuleName: qualityGranuleName.trim(),
+        phaseJobId: harmonyJobId.trim(),
+        coordinates: [...coordinates, coordinates[0]],
+      });
+      setQualityBundle(response);
+      const initialStatuses = Object.fromEntries(Object.entries(response.jobs).map(([role, job]) => [role, job.status]));
+      setQualityStatuses(initialStatuses);
+      const errorCount = Object.keys(response.submission_errors || {}).length;
+      setQualityMessage(errorCount
+        ? `Some layers were not submitted (${errorCount}). Review each message before continuing; do not blindly repeat the request.`
+        : 'Layer jobs submitted. Wait for them to finish, then check all job statuses.');
+    } catch (error) {
+      setQualityError(error instanceof Error ? error.message : 'Could not submit the companion quality layers.');
+      setQualityMessage('');
+    } finally {
+      setIsQualityStarting(false);
+    }
+  };
+
+  const checkQualityLayers = async () => {
+    if (!qualityBundle) return;
+    setQualityError('');
+    setQualityMessage('Checking NASA Harmony job statuses…');
+    setIsQualityChecking(true);
+    try {
+      const entries = Object.entries(qualityBundle.jobs);
+      const statuses = await Promise.all(entries.map(async ([role, job]) => {
+        const response = await getNisarHarmonyJobStatus(job.job_id);
+        return [role, String(response.job?.status || 'unknown').toLowerCase()] as const;
+      }));
+      const next = Object.fromEntries(statuses);
+      setQualityStatuses(next);
+      const required = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
+      const allRequiredSuccessful = required.every((role) => next[role] === 'successful' || next[role] === 'completed' || next[role] === 'complete');
+      const pending = statuses.filter(([, status]) => !['successful', 'completed', 'complete'].includes(status));
+      setQualityMessage(allRequiredSuccessful
+        ? 'All required quality-layer jobs are complete. You can run the AOI quality diagnostics.'
+        : `${pending.length} layer job(s) are still running or failed. Wait or inspect the status below before analysis.`);
+    } catch (error) {
+      setQualityError(error instanceof Error ? error.message : 'Could not check one or more Harmony jobs.');
+      setQualityMessage('');
+    } finally {
+      setIsQualityChecking(false);
+    }
+  };
+
+  const runQualityAnalysis = async () => {
+    if (!qualityBundle || !areaClosed || coordinates.length < 3) {
+      setQualityError('Start the quality jobs and close the AOI polygon first.');
+      return;
+    }
+    setQualityError('');
+    setQualityMessage('Reading aligned remote AOI windows and applying quality gates…');
+    setIsQualityAnalyzing(true);
+    try {
+      const response = await analyzeGunwAoiQuality({
+        granuleName: qualityGranuleName.trim(),
+        coordinates: [...coordinates, coordinates[0]],
+        jobs: qualityBundle.jobs,
+      });
+      setQualityAnalysis(response);
+      setQualityMessage('Quality diagnostics completed. Displacement was not calculated.');
+    } catch (error) {
+      setQualityError(error instanceof Error ? error.message : 'Could not analyze the multi-layer AOI.');
+      setQualityMessage('');
+    } finally {
+      setIsQualityAnalyzing(false);
     }
   };
 
@@ -851,11 +1054,24 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                   coordinates={coordinates}
                   areaClosed={areaClosed}
                   jobId={harmonyJobId}
-                  onJobIdChange={(value) => { setHarmonyJobId(value); setAoiWindowResult(null); setAoiWindowError(''); }}
+                  onJobIdChange={(value) => { setHarmonyJobId(value); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); }}
                   isLoading={isAoiWindowLoading}
                   error={aoiWindowError}
                   result={aoiWindowResult}
                   onRun={runAoiWindowRead}
+                  granuleName={qualityGranuleName}
+                  onGranuleNameChange={(value) => { setQualityGranuleName(value); setQualityBundle(null); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); }}
+                  qualityBundle={qualityBundle}
+                  qualityStatuses={qualityStatuses}
+                  qualityMessage={qualityMessage}
+                  qualityError={qualityError}
+                  qualityStartLoading={isQualityStarting}
+                  qualityCheckLoading={isQualityChecking}
+                  qualityAnalyzeLoading={isQualityAnalyzing}
+                  qualityAnalysis={qualityAnalysis}
+                  onStartQualityLayers={startQualityLayers}
+                  onCheckQualityLayers={checkQualityLayers}
+                  onAnalyzeQuality={runQualityAnalysis}
                 />
               )}
               {catalogError && <p className="catalog-error" role="alert">{catalogError}</p>}

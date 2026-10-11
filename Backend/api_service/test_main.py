@@ -143,3 +143,81 @@ def test_crop_aoi_endpoint_rejects_invalid_polygon(monkeypatch):
         headers={"x-forwarded-for": "test-crop-window-2"},
     )
     assert response.status_code == 422
+
+
+def test_gunw_quality_start_endpoint_passes_valid_request_to_bundle_helper(monkeypatch):
+    captured = {}
+
+    def fake_start(**kwargs):
+        captured.update(kwargs)
+        return {
+            "service": "SARGuardian GUNW companion-layer jobs",
+            "mode": "multi-layer-jobs-submitted",
+            "jobs": {
+                "unwrapped_phase": {"job_id": kwargs["phase_job_id"], "status": "successful"},
+                "coherence": {"job_id": "coherence-123456", "status": "submitted"},
+                "connected_components": {"job_id": "components-123456", "status": "submitted"},
+                "ionosphere_phase_screen": {"job_id": "ionosphere-123456", "status": "submitted"},
+                "mask": {"job_id": "mask-job-123456", "status": "submitted"},
+            },
+            "submission_errors": {},
+            "all_required_layers_submitted": True,
+        }
+
+    monkeypatch.setattr(main, "start_gunw_quality_layer_jobs", fake_start)
+    response = client.post(
+        "/api/harmony/gunw-quality/start",
+        json={
+            "granule_name": "NISAR_L2_PR_GUNW_027_149_D_074_028_2000_SH_20260811T130632_20260811T130706_20260823T130631_20260823T130706_P05023_N_F_J_001",
+            "phase_job_id": "phase-job-123456",
+            "coordinates": square(),
+            "maturity": "PROVISIONAL",
+            "polarization": "HH",
+            "confirm_full_granule_layers": True,
+            "include_iono_uncertainty": False,
+        },
+        headers={"x-forwarded-for": "test-quality-start-1"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["all_required_layers_submitted"] is True
+    assert body["aoi_coordinates_received"] == 4
+    assert captured["phase_job_id"] == "phase-job-123456"
+    assert captured["confirm_full_granule_layers"] is True
+
+
+def test_gunw_quality_analyze_endpoint_passes_job_ids_and_aoi(monkeypatch):
+    captured = {}
+
+    def fake_analyze(**kwargs):
+        captured.update(kwargs)
+        return {
+            "service": "SARGuardian GUNW AOI quality-gate diagnostics",
+            "mode": "multi-layer-aoi-quality-diagnostics",
+            "physical_displacement": {"computed": False, "unit": None, "reason": "Reference required."},
+            "quality_gates": {"jointly_qualified_pixels": 42, "jointly_qualified_fraction_of_polygon": 0.6, "coherence_threshold": 0.3},
+        }
+
+    monkeypatch.setattr(main, "analyze_gunw_aoi_layers", fake_analyze)
+    response = client.post(
+        "/api/harmony/gunw-quality/analyze-aoi",
+        json={
+            "granule_name": "NISAR_L2_PR_GUNW_027_149_D_074_028_2000_SH_20260811T130632_20260811T130706_20260823T130631_20260823T130706_P05023_N_F_J_001",
+            "polarization": "HH",
+            "coordinates": square(),
+            "phase_job_id": "phase-job-123456",
+            "coherence_job_id": "coherence-123456",
+            "connected_components_job_id": "components-123456",
+            "ionosphere_phase_screen_job_id": "ionosphere-123456",
+            "mask_job_id": "mask-job-123456",
+            "ionosphere_phase_screen_uncertainty_job_id": "uncertainty-123456",
+            "coherence_threshold": 0.3,
+        },
+        headers={"x-forwarded-for": "test-quality-analyze-1"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["quality_gates"]["jointly_qualified_pixels"] == 42
+    assert body["physical_displacement"]["computed"] is False
+    assert captured["job_ids"]["unwrapped_phase"] == "phase-job-123456"
+    assert captured["job_ids"]["ionosphere_phase_screen_uncertainty"] == "uncertainty-123456"

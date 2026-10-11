@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from harmony_preflight import get_harmony_capabilities
+from harmony_preflight import get_harmony_capabilities, HarmonyLookupError
 
 HARMONY_ROOT = "https://harmony.earthdata.nasa.gov"
 USER_AGENT = "SARGuardian/0.3 (single-layer GUNW extraction pilot)"
@@ -180,7 +180,7 @@ def _job_id_from_payload(payload: dict[str, Any], location: str | None = None) -
     return None
 
 
-def build_single_layer_request_url(*, collection_id: str, granule_name: str, variable: str) -> str:
+def build_single_layer_request_url(*, collection_id: str, granule_name: str, variable: str, layer_label: str = "sarguardian-gunw-pilot") -> str:
     """Build a one-granule variable-only request; no spatial subset is claimed."""
     if not re.fullmatch(r"C[A-Za-z0-9_-]{5,80}", collection_id):
         raise HarmonyJobError("The capability response did not provide a valid collection concept ID.")
@@ -196,7 +196,7 @@ def build_single_layer_request_url(*, collection_id: str, granule_name: str, var
         ("maxResults", "1"),
         ("skipPreview", "true"),
         ("ignoreErrors", "false"),
-        ("label", "sarguardian-gunw-pilot"),
+        ("label", layer_label),
         ("variable", variable),
     ])
     return f"{path}?{query}"
@@ -206,9 +206,20 @@ def submit_single_layer_job(
     *, granule_name: str, maturity: str, polarization: str,
     layer_role: str, confirm_full_granule_layer: bool,
 ) -> dict[str, Any]:
-    """Start exactly one GUNW phase-layer job. No TIFF is downloaded here."""
-    if layer_role != "unwrapped_phase":
-        raise HarmonyJobError("The first extraction pilot permits only unwrapped_phase. Additional layers will be added after this path is verified.")
+    """Start one GUNW variable-layer job. No TIFF is downloaded here."""
+    supported_roles = {
+        "unwrapped_phase",
+        "coherence",
+        "connected_components",
+        "ionosphere_phase_screen",
+        "ionosphere_phase_screen_uncertainty",
+        "mask",
+    }
+    if layer_role not in supported_roles:
+        raise HarmonyJobError(
+            "Unsupported GUNW layer role. Choose unwrapped_phase, coherence, connected_components, "
+            "ionosphere_phase_screen, ionosphere_phase_screen_uncertainty, or mask."
+        )
     if not confirm_full_granule_layer:
         raise HarmonyJobError(
             "This GUNW collection does not advertise AOI subset support. Set confirm_full_granule_layer=true only after reviewing that the pilot will request one layer across the full granule."
@@ -233,7 +244,10 @@ def submit_single_layer_job(
         raise HarmonyJobError("The capability response did not include a collection concept ID.")
 
     token = _token()
-    url = build_single_layer_request_url(collection_id=collection_id, granule_name=granule_name, variable=variable)
+    url = build_single_layer_request_url(
+        collection_id=collection_id, granule_name=granule_name, variable=variable,
+        layer_label=f"sarguardian-gunw-{layer_role.replace('_', '-')}",
+    )
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/json, application/geo+json;q=0.9, */*;q=0.1",
@@ -282,7 +296,7 @@ def submit_single_layer_job(
             "aoi_subset_requested": False,
             "data_downloaded_by_sarguardian": False,
             "scientific_analysis_performed": False,
-            "message": "Harmony job submitted. This service only queued one variable layer; SARGuardian has not downloaded or analyzed the result.",
+            "message": "Harmony job submitted. This service only queued one variable layer; SARGuardian has not downloaded or scientifically analyzed the result.",
         }
 
     if status in {301, 302, 303, 307, 308}:
@@ -538,7 +552,9 @@ def inspect_harmony_job_result(job_id: str) -> dict[str, Any]:
     }
 
 
-def _resolve_result_url_for_window_read(job_id: str) -> tuple[str, dict[str, Any]]:
+def _resolve_result_url_for_window_read(
+    job_id: str, *, expected_granule_name: str | None = None, expected_variable: str | None = None
+) -> tuple[str, dict[str, Any]]:
     """Resolve a completed Harmony result to its temporary storage URL.
 
     The signed URL is kept only in memory and must never be returned or logged.
@@ -550,6 +566,17 @@ def _resolve_result_url_for_window_read(job_id: str) -> tuple[str, dict[str, Any
     state = str(job.get("status", "unknown")).lower()
     if state not in {"successful", "completed", "complete"}:
         raise HarmonyJobError(f"Harmony job is not complete (status={state}); no raster pixels were read.")
+
+    if expected_granule_name or expected_variable:
+        request_url = str(job.get("request") or "")
+        request_parts = urllib.parse.urlparse(request_url)
+        request_params = urllib.parse.parse_qs(request_parts.query)
+        request_granule = (request_params.get("granuleName") or [None])[0]
+        request_variable = (request_params.get("variable") or [None])[0]
+        if expected_granule_name and request_granule != expected_granule_name:
+            raise HarmonyJobError("Harmony job granule does not match the requested analysis granule.")
+        if expected_variable and request_variable != expected_variable:
+            raise HarmonyJobError("Harmony job variable does not match the expected GUNW layer; refusing to combine layers.")
 
     links = job.get("links") if isinstance(job.get("links"), list) else []
     link = next((item for item in links if isinstance(item, dict) and str(item.get("rel", "")).lower() == "data" and isinstance(item.get("href"), str)), None)
@@ -722,4 +749,404 @@ def crop_harmony_job_result_aoi(job_id: str, coordinates: list[tuple[float, floa
         "raster_window_pixels_read": True,
         "scientific_analysis_performed": False,
         **crop,
+    }
+
+# ---------------------------------------------------------------------------
+# Multi-layer AOI diagnostics, designed to match the core GUNW reader gates.
+# No output raster is persisted and no displacement is reported without a
+# source-product wavelength plus a valid stable reference area.
+# ---------------------------------------------------------------------------
+GUNW_LAYER_ROLES = (
+    "unwrapped_phase",
+    "coherence",
+    "connected_components",
+    "ionosphere_phase_screen",
+    "mask",
+    "ionosphere_phase_screen_uncertainty",
+)
+
+
+def _expected_gunw_variable(role: str, polarization: str) -> str:
+    pol = polarization.upper()
+    if pol not in {"HH", "VV"}:
+        raise HarmonyJobError("Polarization must be HH or VV.")
+    base = "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram"
+    suffixes = {
+        "unwrapped_phase": f"{pol}/unwrappedPhase",
+        "coherence": f"{pol}/coherenceMagnitude",
+        "connected_components": f"{pol}/connectedComponents",
+        "ionosphere_phase_screen": f"{pol}/ionospherePhaseScreen",
+        "ionosphere_phase_screen_uncertainty": f"{pol}/ionospherePhaseScreenUncertainty",
+        "mask": "mask",
+    }
+    if role not in suffixes:
+        raise HarmonyJobError(f"Unsupported GUNW layer role: {role}.")
+    return f"{base}/{suffixes[role]}"
+
+
+def start_gunw_quality_layer_jobs(
+    *, granule_name: str, phase_job_id: str, maturity: str, polarization: str,
+    confirm_full_granule_layers: bool, include_iono_uncertainty: bool = True,
+) -> dict[str, Any]:
+    """Reuse a completed phase job and queue required companion quality layers.
+
+    This queues separate one-variable jobs because the current net2cog service
+    advertises one-variable output, not multiple-variable output. All outputs
+    stay on Harmony staging; SARGuardian does not download raster files here.
+    """
+    if not confirm_full_granule_layers:
+        raise HarmonyJobError(
+            "The current net2cog service cannot crop the AOI server-side. Set "
+            "confirm_full_granule_layers=true only after accepting that each queued layer covers the full granule."
+        )
+    match = re.match(r"^NISAR_L2_(PR|UR)_GUNW_", granule_name)
+    if not match:
+        raise HarmonyJobError("Provide an exact NISAR L2 PR/UR GUNW granule name.")
+    pol = polarization.upper()
+    if pol not in {"HH", "VV"}:
+        raise HarmonyJobError("Polarization must be HH or VV.")
+
+    # Validate that the supplied phase job belongs to this exact granule and
+    # expected polarization/layer, rather than mixing unrelated job IDs.
+    phase_status = get_harmony_job_status(phase_job_id)
+    phase_job = phase_status.get("job") if isinstance(phase_status.get("job"), dict) else {}
+    phase_state = str(phase_job.get("status", "unknown")).lower()
+    if phase_state not in {"successful", "completed", "complete"}:
+        raise HarmonyJobError(f"Phase job must be successful before companion layers can be queued (status={phase_state}).")
+    request_url = str(phase_job.get("request") or "")
+    parsed_request = urllib.parse.urlparse(request_url)
+    request_qs = urllib.parse.parse_qs(parsed_request.query)
+    actual_granule = (request_qs.get("granuleName") or [None])[0]
+    actual_variable = (request_qs.get("variable") or [None])[0]
+    expected_phase_variable = _expected_gunw_variable("unwrapped_phase", pol)
+    if actual_granule != granule_name or actual_variable != expected_phase_variable:
+        raise HarmonyJobError(
+            "The supplied phase job does not match the requested granule and polarization. "
+            "Use the successful unwrapped-phase job for the exact granule/polarization."
+        )
+
+    roles = ["coherence", "connected_components", "ionosphere_phase_screen", "mask"]
+    if include_iono_uncertainty:
+        roles.append("ionosphere_phase_screen_uncertainty")
+    jobs: dict[str, Any] = {
+        "unwrapped_phase": {
+            "job_id": phase_job_id,
+            "reused_existing_job": True,
+            "status": "successful",
+            "variable": expected_phase_variable,
+        }
+    }
+    errors: dict[str, str] = {}
+    for role in roles:
+        try:
+            result = submit_single_layer_job(
+                granule_name=granule_name,
+                maturity=maturity.upper(),
+                polarization=pol,
+                layer_role=role,
+                confirm_full_granule_layer=True,
+            )
+            jobs[role] = {
+                "job_id": result["job_id"],
+                "reused_existing_job": False,
+                "status": "submitted",
+                "variable": result.get("variable"),
+                "job_status_url": result.get("job_status_url"),
+            }
+        except (HarmonyJobError, HarmonyLookupError) as exc:
+            # Avoid raising after some jobs have already been accepted; return
+            # partial submission IDs so the user can continue without silently
+            # queuing duplicates. Error strings are sanitized by the helpers.
+            errors[role] = str(exc)
+    return {
+        "service": "SARGuardian GUNW companion-layer jobs",
+        "mode": "multi-layer-jobs-submitted",
+        "granule_name": granule_name,
+        "polarization": pol,
+        "maturity": maturity.upper(),
+        "jobs": jobs,
+        "submission_errors": errors,
+        "all_required_layers_submitted": all(
+            role in jobs for role in ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
+        ),
+        "aoi_subset_requested": False,
+        "result_rasters_downloaded_by_sarguardian": False,
+        "scientific_analysis_performed": False,
+        "next_step": "Wait for all required jobs to succeed, then call the AOI quality-analysis endpoint with these job IDs and the same polygon.",
+        "warning": "Companion layers are full-granule GeoTIFF outputs staged by Harmony. SARGuardian reads only the requested AOI window remotely and does not persist the full TIFFs.",
+    }
+
+
+def _read_remote_cog_aoi_array(
+    source: str,
+    coordinates: list[tuple[float, float]],
+    max_window_pixels: int = 1_000_000,
+) -> dict[str, Any]:
+    """Read one bounded COG window and its polygon mask into memory only."""
+    try:
+        import numpy as np
+        import rasterio
+        from rasterio.errors import WindowError
+        from rasterio.features import geometry_mask, geometry_window
+        from rasterio.warp import transform_geom, transform_bounds
+    except ImportError as exc:
+        raise HarmonyJobError("AOI analysis requires rasterio and numpy; install Backend API requirements and redeploy.") from exc
+
+    ring = list(coordinates)
+    if len(ring) >= 3 and ring[0] != ring[-1]:
+        ring.append(ring[0])
+    polygon = {"type": "Polygon", "coordinates": [[list(point) for point in ring]]}
+    try:
+        with rasterio.Env(
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            CPL_VSIL_CURL_USE_HEAD="YES",
+            CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
+            GDAL_HTTP_MAX_RETRY="2",
+            GDAL_HTTP_TIMEOUT="25",
+            CPL_CURL_VERBOSE="NO",
+        ):
+            with rasterio.open(source, sharing=False) as dataset:
+                if dataset.driver != "GTiff" or dataset.count != 1:
+                    raise HarmonyJobError("Each GUNW layer must resolve to a single-band GeoTIFF.")
+                if dataset.crs is None:
+                    raise HarmonyJobError("A layer GeoTIFF has no CRS; refusing to combine grids without georeferencing.")
+                native_polygon = transform_geom("EPSG:4326", dataset.crs, polygon, precision=8)
+                try:
+                    window = geometry_window(dataset, [native_polygon], pad_x=0, pad_y=0)
+                except WindowError as exc:
+                    raise HarmonyJobError("The selected AOI does not intersect one of the required layer rasters.") from exc
+                width, height = int(window.width), int(window.height)
+                if width <= 0 or height <= 0 or width * height > max_window_pixels:
+                    raise HarmonyJobError("AOI raster window is empty or exceeds the safe pixel limit.")
+                data = dataset.read(1, window=window, masked=True)
+                values = np.asarray(data.data, dtype=np.float64)
+                valid_data = ~np.ma.getmaskarray(data) & np.isfinite(values)
+                inside = geometry_mask(
+                    [native_polygon],
+                    out_shape=(height, width),
+                    transform=dataset.window_transform(window),
+                    invert=True,
+                    all_touched=False,
+                )
+                bounds = transform_bounds(dataset.crs, "EPSG:4326", *dataset.window_bounds(window), densify_pts=21)
+                transform = tuple(float(x) for x in dataset.transform)
+                window_transform = tuple(float(x) for x in dataset.window_transform(window))
+                return {
+                    "values": values,
+                    "valid_data": valid_data,
+                    "inside": inside,
+                    "grid": {
+                        "crs": str(dataset.crs),
+                        "width": int(dataset.width),
+                        "height": int(dataset.height),
+                        "transform": transform,
+                        "window_transform": window_transform,
+                        "window_width": width,
+                        "window_height": height,
+                        "window_pixels": width * height,
+                        "window_bounds_wgs84": [float(v) for v in bounds],
+                    },
+                    "nodata": float(dataset.nodata) if dataset.nodata is not None else None,
+                }
+    except HarmonyJobError:
+        raise
+    except Exception as exc:
+        raise HarmonyJobError(
+            f"Could not read a required layer from the remote COG ({type(exc).__name__}); no full raster was intentionally downloaded or saved."
+        ) from exc
+
+
+def _read_job_aoi_layer(
+    *, job_id: str, granule_name: str, polarization: str, role: str,
+    coordinates: list[tuple[float, float]],
+) -> dict[str, Any]:
+    expected_variable = _expected_gunw_variable(role, polarization)
+    final_url, link = _resolve_result_url_for_window_read(
+        job_id,
+        expected_granule_name=granule_name,
+        expected_variable=expected_variable,
+    )
+    remote_source = "/vsicurl/" + final_url
+    layer = _read_remote_cog_aoi_array(remote_source, coordinates)
+    layer["result_filename"] = str(link.get("title") or "")
+    layer["job_id"] = job_id
+    layer["role"] = role
+    layer["expected_variable"] = expected_variable
+    return layer
+
+
+def _array_stats(values: Any, valid: Any) -> dict[str, Any] | None:
+    import numpy as np
+    sample = np.asarray(values, dtype=np.float64)[np.asarray(valid, dtype=bool)]
+    if not sample.size:
+        return None
+    return {
+        "min": float(np.min(sample)),
+        "max": float(np.max(sample)),
+        "mean": float(np.mean(sample)),
+        "std": float(np.std(sample)),
+        "count": int(sample.size),
+    }
+
+
+def analyze_gunw_aoi_layers(
+    *, granule_name: str, polarization: str, coordinates: list[tuple[float, float]],
+    job_ids: dict[str, str], coherence_threshold: float = 0.3,
+) -> dict[str, Any]:
+    """Read required GUNW COG layer windows and apply reader-compatible gates.
+
+    It mirrors the core gates in src/gunw_reader.py but does not invoke its
+    HDF5-only read_gunw() function: these are separate GeoTIFF layers. It does
+    not produce referenced LOS displacement, landslide detection, or a risk
+    score. Arrays are held in memory for the request and then discarded.
+    """
+    import numpy as np
+    if not 0.0 <= coherence_threshold <= 1.0:
+        raise HarmonyJobError("coherence_threshold must be between 0 and 1.")
+    required_roles = ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
+    missing = [role for role in required_roles if not job_ids.get(role)]
+    if missing:
+        raise HarmonyJobError("Missing completed Harmony job IDs for required layers: " + ", ".join(missing))
+
+    layers: dict[str, dict[str, Any]] = {}
+    for role in (*required_roles, "ionosphere_phase_screen_uncertainty"):
+        job_id = job_ids.get(role)
+        if not job_id:
+            continue
+        layers[role] = _read_job_aoi_layer(
+            job_id=job_id,
+            granule_name=granule_name,
+            polarization=polarization,
+            role=role,
+            coordinates=coordinates,
+        )
+
+    reference = layers["unwrapped_phase"]["grid"]
+    for role, layer in layers.items():
+        grid = layer["grid"]
+        if grid["crs"] != reference["crs"] or grid["width"] != reference["width"] or grid["height"] != reference["height"]:
+            raise HarmonyJobError(f"Layer grid mismatch for {role}; refusing to combine rasters from different grids.")
+        if len(grid["transform"]) != len(reference["transform"]) or any(
+            abs(a - b) > 1e-8 for a, b in zip(grid["transform"], reference["transform"])
+        ):
+            raise HarmonyJobError(f"Layer geotransform mismatch for {role}; scientific layer alignment is not safe.")
+        if grid["window_width"] != reference["window_width"] or grid["window_height"] != reference["window_height"]:
+            raise HarmonyJobError(f"AOI window shape mismatch for {role}; refusing to combine unaligned arrays.")
+        if not np.array_equal(layer["inside"], layers["unwrapped_phase"]["inside"]):
+            raise HarmonyJobError(f"Polygon rasterization mismatch for {role}; refusing to combine unaligned arrays.")
+
+    phase_layer = layers["unwrapped_phase"]
+    coh_layer = layers["coherence"]
+    comp_layer = layers["connected_components"]
+    iono_layer = layers["ionosphere_phase_screen"]
+    mask_layer = layers["mask"]
+    inside = phase_layer["inside"]
+    phase = phase_layer["values"]
+    coherence = coh_layer["values"]
+    components = comp_layer["values"]
+    iono = iono_layer["values"]
+    mask_values = mask_layer["values"]
+
+    # Match the core reader's gates: raw zero is treated as no phase; coherence
+    # must meet threshold; connected component IDs must be positive; and the
+    # GUNW mask is decoded as water/subswath bits, not treated as a boolean mask.
+    phase_valid = inside & phase_layer["valid_data"] & np.isfinite(phase) & (phase != 0)
+    coherence_valid = inside & coh_layer["valid_data"] & np.isfinite(coherence)
+    coherence_pass = coherence_valid & (coherence >= coherence_threshold)
+    components_valid = inside & comp_layer["valid_data"] & np.isfinite(components)
+    components_pass = components_valid & (components > 0)
+    iono_valid = inside & iono_layer["valid_data"] & np.isfinite(iono)
+    mask_valid = inside & mask_layer["valid_data"] & np.isfinite(mask_values)
+    mask_int = np.where(mask_valid, mask_values, 255).astype(np.int64)
+    water = mask_int // 100
+    ref_subswath = (mask_int // 10) % 10
+    sec_subswath = mask_int % 10
+    mask_pass = mask_valid & (water == 0) & (ref_subswath > 0) & (sec_subswath > 0) & (mask_int != 255)
+
+    jointly_valid = phase_valid & coherence_pass & components_pass & iono_valid & mask_pass
+    corrected_phase = phase - np.where(iono_valid, iono, 0.0)
+    corrected_phase_stats = _array_stats(corrected_phase, jointly_valid)
+
+    comp_sample = components[phase_valid & coherence_pass & components_pass]
+    dominant_component = None
+    dominant_component_share = None
+    component_count = 0
+    if comp_sample.size:
+        component_values, component_counts = np.unique(comp_sample.astype(np.int64), return_counts=True)
+        best = int(np.argmax(component_counts))
+        dominant_component = int(component_values[best])
+        dominant_component_share = round(float(component_counts[best] / component_counts.sum()), 6)
+        component_count = int(component_values.size)
+
+    layer_stats: dict[str, Any] = {}
+    for role, key, valid_mask in (
+        ("unwrapped_phase", "raw_phase", phase_valid),
+        ("coherence", "coherence", coherence_valid),
+        ("connected_components", "connected_components_values", components_valid),
+        ("ionosphere_phase_screen", "ionosphere_phase_screen", iono_valid),
+        ("mask", "mask_values", mask_valid),
+    ):
+        layer_stats[role] = _array_stats(layers[role]["values"], valid_mask)
+    if "ionosphere_phase_screen_uncertainty" in layers:
+        unc = layers["ionosphere_phase_screen_uncertainty"]
+        layer_stats["ionosphere_phase_screen_uncertainty"] = _array_stats(
+            unc["values"], unc["inside"] & unc["valid_data"] & np.isfinite(unc["values"])
+        )
+
+    return {
+        "service": "SARGuardian GUNW AOI quality-gate diagnostics",
+        "mode": "multi-layer-aoi-quality-diagnostics",
+        "granule_name": granule_name,
+        "polarization": polarization.upper(),
+        "job_statuses": {role: "successful" for role in layers},
+        "aoi_cropped_in_memory": True,
+        "full_raster_downloaded_by_sarguardian": False,
+        "persistent_storage_used": False,
+        "aoi": {
+            "window_width_px": int(reference["window_width"]),
+            "window_height_px": int(reference["window_height"]),
+            "window_pixels": int(reference["window_pixels"]),
+            "polygon_pixels": int(inside.sum()),
+            "window_bounds_wgs84": reference["window_bounds_wgs84"],
+            "crs": reference["crs"],
+        },
+        "layers": layer_stats,
+        "quality_gates": {
+            "phase_nonzero_finite_pixels": int(phase_valid.sum()),
+            "coherence_valid_pixels": int(coherence_valid.sum()),
+            "coherence_threshold": coherence_threshold,
+            "coherence_pass_pixels": int(coherence_pass.sum()),
+            "connected_components_positive_pixels": int(components_pass.sum()),
+            "ionosphere_phase_screen_valid_pixels": int(iono_valid.sum()),
+            "mask_valid_land_subswath_pixels": int(mask_pass.sum()),
+            "jointly_qualified_pixels": int(jointly_valid.sum()),
+            "jointly_qualified_fraction_of_polygon": round(float(jointly_valid.sum() / max(1, int(inside.sum()))), 6),
+            "dominant_connected_component_id": dominant_component,
+            "dominant_component_share_among_phase_coherence_pixels": dominant_component_share,
+            "distinct_positive_components_in_phase_coherence_pixels": component_count,
+        },
+        "ionosphere_corrected_phase_statistics": corrected_phase_stats,
+        "physical_displacement": {
+            "computed": False,
+            "unit": None,
+            "reason": "The phase remains unreferenced and a stable reference area plus verified source-product metadata are required before reporting LOS displacement.",
+        },
+        "original_scientific_engine": {
+            "source_module": "Backend/src/gunw_reader.py",
+            "hdf5_read_gunw_invoked": False,
+            "reader_compatible_core_gates_applied_to_aligned_aoi_arrays": True,
+            "gates": [
+                "nonzero finite unwrapped phase",
+                f"coherence magnitude >= {coherence_threshold}",
+                "connected component ID > 0",
+                "GUNW mask decoded for water and reference/secondary subswath validity",
+                "ionosphere phase screen subtracted where valid",
+            ],
+            "note": "This is an array adapter aligned with the original reader's quality gates, not a call to its HDF5-only read_gunw function. No reference was selected and no LOS displacement was computed.",
+        },
+        "warnings": [
+            "These are AOI-only diagnostics from layers of one interferometric pair, not a temporal change map.",
+            "No landslide detection, prediction, or emergency warning has been performed.",
+            "Layer grids were checked for exact alignment before any combined quality gate was calculated.",
+        ],
     }

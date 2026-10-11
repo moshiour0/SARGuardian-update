@@ -86,3 +86,19 @@
 .aoi-window-meta { display: block; color: rgba(238,255,245,.62); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 1020px) { .aoi-window-panel { grid-column: 1 / -1; } }
 @media (max-width: 640px) { .aoi-window-panel { max-height: 28vh; padding: 9px; } .aoi-window-panel h3 { font-size: 13px; } }
+
+/* Multi-layer GUNW AOI quality diagnostics; all raster windows remain in request memory. */
+.quality-layer-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(174,216,255,.24); }
+.quality-layer-section > .result-kicker { display: block; margin-bottom: 7px; }
+.quality-job-list { display: grid; gap: 7px; margin-top: 12px; }
+.quality-job-list > strong { color: #b4f1d3; font: 700 12px 'Manrope', sans-serif; }
+.quality-job-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(80px, 1.2fr) auto; gap: 7px; align-items: center; padding: 7px; border: 1px solid rgba(226,255,240,.12); border-radius: 4px; background: rgba(4,48,53,.5); }
+.quality-job-row span { color: #dff4f4; font-size: 10px; text-transform: capitalize; }
+.quality-job-row code { overflow-wrap: anywhere; color: #9ecce8; font-size: 9px; }
+.quality-job-row b { color: #b4f1d3; font-size: 9px; text-transform: uppercase; }
+.quality-action-button { width: 100%; min-height: 34px; }
+.quality-action-button:disabled { opacity: .45; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .quality-job-row { grid-template-columns: 1fr auto; }
+  .quality-job-row code { grid-column: 1 / -1; grid-row: 2; }
+}

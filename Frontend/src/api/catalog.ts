@@ -117,3 +117,127 @@ export async function inspectNisarAoiWindow(input: {
   }
   return payload;
 }
+
+export type HarmonyQualityLayerJob = {
+  job_id: string;
+  status: string;
+  variable?: string;
+  job_status_url?: string;
+  reused_existing_job?: boolean;
+};
+
+export type HarmonyQualityLayerBundle = {
+  service: string;
+  mode: string;
+  granule_name: string;
+  polarization: string;
+  maturity: string;
+  jobs: Record<string, HarmonyQualityLayerJob>;
+  submission_errors: Record<string, string>;
+  all_required_layers_submitted: boolean;
+  aoi_area_km2?: number;
+  warning?: string;
+  next_step?: string;
+};
+
+export type HarmonyJobStatusResponse = {
+  job_id: string;
+  job?: { status?: string; progress?: number; message?: string };
+};
+
+export type GunwQualityAnalysisResponse = {
+  service: string;
+  mode: string;
+  granule_name: string;
+  polarization: string;
+  aoi?: { window_width_px: number; window_height_px: number; window_pixels: number; polygon_pixels: number; crs: string };
+  layers?: Record<string, { min: number; max: number; mean: number; std: number; count: number } | null>;
+  quality_gates?: {
+    phase_nonzero_finite_pixels: number;
+    coherence_valid_pixels: number;
+    coherence_threshold: number;
+    coherence_pass_pixels: number;
+    connected_components_positive_pixels: number;
+    ionosphere_phase_screen_valid_pixels: number;
+    mask_valid_land_subswath_pixels: number;
+    jointly_qualified_pixels: number;
+    jointly_qualified_fraction_of_polygon: number;
+    dominant_connected_component_id: number | null;
+    dominant_component_share_among_phase_coherence_pixels: number | null;
+    distinct_positive_components_in_phase_coherence_pixels: number;
+  };
+  ionosphere_corrected_phase_statistics?: { min: number; max: number; mean: number; std: number; count: number } | null;
+  physical_displacement?: { computed: boolean; unit: string | null; reason: string };
+  original_scientific_engine?: { hdf5_read_gunw_invoked: boolean; reader_compatible_core_gates_applied_to_aligned_aoi_arrays: boolean; note: string };
+  warnings?: string[];
+  detail?: string;
+};
+
+async function readApiPayload<T>(response: Response, fallback: string): Promise<T> {
+  const payload = await response.json().catch(() => ({})) as T & { detail?: string; message?: string };
+  if (!response.ok) {
+    throw new Error(payload.detail || payload.message || `${fallback} (${response.status}).`);
+  }
+  return payload as T;
+}
+
+export async function startGunwQualityLayers(input: {
+  granuleName: string;
+  phaseJobId: string;
+  coordinates: Coordinate[];
+  maturity?: 'PROVISIONAL' | 'BETA';
+  polarization?: 'HH' | 'VV';
+}): Promise<HarmonyQualityLayerBundle> {
+  const response = await fetch(`${API_BASE}/api/harmony/gunw-quality/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      granule_name: input.granuleName,
+      phase_job_id: input.phaseJobId,
+      coordinates: input.coordinates,
+      maturity: input.maturity ?? 'PROVISIONAL',
+      polarization: input.polarization ?? 'HH',
+      confirm_full_granule_layers: true,
+      include_iono_uncertainty: true,
+    }),
+  });
+  return readApiPayload<HarmonyQualityLayerBundle>(response, 'Could not start GUNW quality-layer jobs');
+}
+
+export async function getNisarHarmonyJobStatus(jobId: string): Promise<HarmonyJobStatusResponse> {
+  const safeId = jobId.trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(safeId)) throw new Error('Invalid Harmony Job ID.');
+  const response = await fetch(`${API_BASE}/api/harmony/jobs/${encodeURIComponent(safeId)}`);
+  return readApiPayload<HarmonyJobStatusResponse>(response, 'Could not check Harmony job status');
+}
+
+export async function analyzeGunwAoiQuality(input: {
+  granuleName: string;
+  polarization?: 'HH' | 'VV';
+  coordinates: Coordinate[];
+  jobs: Record<string, HarmonyQualityLayerJob>;
+}): Promise<GunwQualityAnalysisResponse> {
+  const required = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
+  const missing = required.filter((role) => !input.jobs[role]?.job_id);
+  if (missing.length) throw new Error(`Missing layer jobs: ${missing.join(', ')}`);
+  const body: Record<string, unknown> = {
+    granule_name: input.granuleName,
+    polarization: input.polarization ?? 'HH',
+    coordinates: input.coordinates,
+    phase_job_id: input.jobs.unwrapped_phase.job_id,
+    coherence_job_id: input.jobs.coherence.job_id,
+    connected_components_job_id: input.jobs.connected_components.job_id,
+    ionosphere_phase_screen_job_id: input.jobs.ionosphere_phase_screen.job_id,
+    mask_job_id: input.jobs.mask.job_id,
+    coherence_threshold: 0.3,
+  };
+  if (input.jobs.ionosphere_phase_screen_uncertainty?.job_id) {
+    body.ionosphere_phase_screen_uncertainty_job_id = input.jobs.ionosphere_phase_screen_uncertainty.job_id;
+  }
+  const response = await fetch(`${API_BASE}/api/harmony/gunw-quality/analyze-aoi`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return readApiPayload<GunwQualityAnalysisResponse>(response, 'Could not analyze the selected GUNW AOI');
+}

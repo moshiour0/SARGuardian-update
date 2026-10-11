@@ -99,3 +99,12 @@ Tests use mocked ASF/Harmony responses. They check parsing, safety limits, ambig
 `POST /api/harmony/jobs/{job_id}/crop-aoi` accepts the exact WGS84 polygon coordinates `[longitude, latitude]` selected in the frontend. After validating the completed Harmony job's trusted result link, the API resolves its temporary HTTPS CloudFront/S3 URL in memory and opens the Cloud-Optimized GeoTIFF through GDAL `/vsicurl/`. Rasterio reads only the intersecting AOI window using remote byte ranges, applies the polygon mask in memory, and returns grid/valid-pixel diagnostics plus raw unwrapped-phase summary statistics. It does not write a GeoTIFF, retain data, or claim to calculate displacement. Signed result URLs are never returned or logged.
 
 This endpoint requires `rasterio` and `numpy` in `api_service/requirements.txt`. It stops if the result is not a supported TIFF with HTTP byte-range access, the AOI does not intersect the raster, or the requested window exceeds 1,000,000 pixels. The summary is not a validated movement analysis: a single phase layer lacks matching coherence, connected-components, optional mask, ionosphere correction and reference-region data that the original `src/gunw_reader.py` expects. The next science step is to obtain aligned supporting layers, preserve georeferencing, and adapt their in-memory arrays to the existing reader's math and quality gates without converting phase to displacement prematurely.
+
+## Multi-layer GUNW AOI quality pilot
+
+The API now supports:
+
+- `POST /api/harmony/gunw-quality/start`: validates a completed phase job for the exact granule/polarization, then queues coherence, connected-components, ionosphere-screen, shared mask, and optional ionosphere-screen-uncertainty jobs.
+- `POST /api/harmony/gunw-quality/analyze-aoi`: reads only the AOI windows from completed remote COG results, verifies same-grid alignment, and reports core GUNW quality-gate counts plus ionosphere-corrected phase diagnostics.
+
+No output GeoTIFF is saved. This does not call the HDF5-only `src/gunw_reader.py::read_gunw()`; it mirrors its core quality gates against the aligned arrays. It intentionally does not report LOS displacement without a stable reference area and verified source metadata. See `GUNW_QUALITY_PILOT_BN.md` for the phone workflow and example requests.

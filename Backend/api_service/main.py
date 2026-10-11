@@ -20,7 +20,11 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from harmony_preflight import get_harmony_capabilities, build_extraction_plan, HarmonyLookupError
-from harmony_extraction import submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result, crop_harmony_job_result_aoi, HarmonyJobError
+from harmony_extraction import (
+    submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result,
+    crop_harmony_job_result_aoi, start_gunw_quality_layer_jobs, analyze_gunw_aoi_layers,
+    HarmonyJobError,
+)
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -34,6 +38,8 @@ MAX_VERTICES = int(os.getenv("MAX_VERTICES", os.getenv("MAX_AOI_VERTICES", "25")
 MAX_GRANULES = int(os.getenv("MAX_GRANULES_PER_SEARCH", "50"))
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "6"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+BUNDLE_STARTS_PER_HOUR = int(os.getenv("GUNW_BUNDLE_STARTS_PER_HOUR", "2"))
+BUNDLE_START_WINDOW_SECONDS = 3600
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ASF_HTTP_TIMEOUT_SECONDS", "35"))
 
 app = FastAPI(
@@ -61,6 +67,7 @@ app.add_middleware(
 # multi-instance deployment; this in-memory limiter is not a distributed quota.
 _rate_lock = threading.Lock()
 _request_times: dict[str, deque[float]] = defaultdict(deque)
+_bundle_request_times: dict[str, deque[float]] = defaultdict(deque)
 
 
 class CatalogSearchRequest(BaseModel):
@@ -108,6 +115,38 @@ class HarmonyExtractStartRequest(BaseModel):
     )
 
 
+class HarmonyQualityLayerStartRequest(BaseModel):
+    granule_name: str = Field(min_length=20, max_length=300)
+    phase_job_id: str = Field(min_length=8, max_length=128)
+    coordinates: list[tuple[float, float]] = Field(
+        min_length=3,
+        description="AOI polygon in WGS84 [longitude, latitude] pairs.",
+    )
+    maturity: str = Field(default="PROVISIONAL")
+    polarization: str = Field(default="HH")
+    confirm_full_granule_layers: bool = Field(
+        default=False,
+        description="Must be true to explicitly authorize full-granule companion-layer outputs staged by Harmony.",
+    )
+    include_iono_uncertainty: bool = True
+
+
+class HarmonyGunwAoiAnalyzeRequest(BaseModel):
+    granule_name: str = Field(min_length=20, max_length=300)
+    polarization: str = Field(default="HH")
+    coordinates: list[tuple[float, float]] = Field(
+        min_length=3,
+        description="AOI polygon in WGS84 [longitude, latitude] pairs.",
+    )
+    phase_job_id: str = Field(min_length=8, max_length=128)
+    coherence_job_id: str = Field(min_length=8, max_length=128)
+    connected_components_job_id: str = Field(min_length=8, max_length=128)
+    ionosphere_phase_screen_job_id: str = Field(min_length=8, max_length=128)
+    mask_job_id: str = Field(min_length=8, max_length=128)
+    ionosphere_phase_screen_uncertainty_job_id: str | None = Field(default=None, min_length=8, max_length=128)
+    coherence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
 def _close_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
     ring = list(coords)
     if ring and ring[0] != ring[-1]:
@@ -153,6 +192,25 @@ def _check_rate_limit(key: str) -> None:
                     f"requests per {RATE_LIMIT_WINDOW_SECONDS} seconds."
                 ),
                 headers={"Retry-After": str(RATE_LIMIT_WINDOW_SECONDS)},
+            )
+        times.append(now)
+
+
+def _check_gunw_bundle_start_limit(key: str) -> None:
+    """Stricter local guard because one bundle request can start five NASA jobs."""
+    now = time.monotonic()
+    with _rate_lock:
+        times = _bundle_request_times[key]
+        while times and now - times[0] > BUNDLE_START_WINDOW_SECONDS:
+            times.popleft()
+        if len(times) >= BUNDLE_STARTS_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"GUNW companion-layer job limit reached: {BUNDLE_STARTS_PER_HOUR} bundle starts "
+                    f"per hour per client in this API process. Reuse submitted job IDs instead of starting duplicates."
+                ),
+                headers={"Retry-After": str(BUNDLE_START_WINDOW_SECONDS)},
             )
         times.append(now)
 
@@ -260,6 +318,7 @@ def health() -> dict[str, Any]:
         "scientific_analysis_performed": False,
         "harmony_capability_discovery": True,
         "single_granule_extraction": "guarded-one-layer-job-submission-available",
+        "multi_layer_gunw_quality_pilot": "companion-layer-jobs-and-aoi-quality-gates-available",
         "aoi_window_read": "available-for-completed-range-enabled-geotiff-results",
         "earthdata_token_configured": bool(os.getenv("EARTHDATA_TOKEN", "").strip()),
         "original_scientific_engine_present": True,
@@ -462,6 +521,86 @@ def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest) -
     except HarmonyJobError as exc:
         message = str(exc)
         status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if "confirm_full_granule_layer=true" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.post("/api/harmony/gunw-quality/start")
+def harmony_start_gunw_quality_layers(request: HarmonyQualityLayerStartRequest, http_request: Request) -> dict[str, Any]:
+    """Reuse a completed phase job and start one-variable companion quality-layer jobs."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    _check_gunw_bundle_start_limit("quality-start:" + (forwarded or client_ip))
+    match = re.match(r"^NISAR_L2_(PR|UR)_GUNW_", request.granule_name.strip())
+    if not match:
+        raise HTTPException(status_code=422, detail="Provide an exact NISAR L2 PR/UR GUNW granule name.")
+    if request.polarization.upper() not in {"HH", "VV"}:
+        raise HTTPException(status_code=422, detail="polarization must be HH or VV.")
+    if request.maturity.upper() not in {"PROVISIONAL", "BETA"}:
+        raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    coords, _start, _end, area_km2 = _validate_search(CatalogSearchRequest(
+        coordinates=request.coordinates,
+        start_date=today_utc,
+        end_date=today_utc,
+        product_type="GUNW",
+    ))
+    try:
+        result = start_gunw_quality_layer_jobs(
+            granule_name=request.granule_name.strip(),
+            phase_job_id=request.phase_job_id.strip(),
+            maturity=request.maturity.upper(),
+            polarization=request.polarization.upper(),
+            confirm_full_granule_layers=request.confirm_full_granule_layers,
+            include_iono_uncertainty=request.include_iono_uncertainty,
+        )
+        result["aoi_area_km2"] = round(area_km2, 3)
+        result["aoi_coordinates_received"] = len(coords)
+        return result
+    except HarmonyLookupError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if "must be successful" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.post("/api/harmony/gunw-quality/analyze-aoi")
+def harmony_analyze_gunw_aoi_quality(request: HarmonyGunwAoiAnalyzeRequest, http_request: Request) -> dict[str, Any]:
+    """Read aligned AOI windows from completed GUNW layer COGs and report quality gates only."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    _check_rate_limit("quality-analyze:" + (forwarded or client_ip))
+    if request.polarization.upper() not in {"HH", "VV"}:
+        raise HTTPException(status_code=422, detail="polarization must be HH or VV.")
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    coords, _start, _end, area_km2 = _validate_search(CatalogSearchRequest(
+        coordinates=request.coordinates,
+        start_date=today_utc,
+        end_date=today_utc,
+        product_type="GUNW",
+    ))
+    job_ids = {
+        "unwrapped_phase": request.phase_job_id,
+        "coherence": request.coherence_job_id,
+        "connected_components": request.connected_components_job_id,
+        "ionosphere_phase_screen": request.ionosphere_phase_screen_job_id,
+        "mask": request.mask_job_id,
+    }
+    if request.ionosphere_phase_screen_uncertainty_job_id:
+        job_ids["ionosphere_phase_screen_uncertainty"] = request.ionosphere_phase_screen_uncertainty_job_id
+    try:
+        result = analyze_gunw_aoi_layers(
+            granule_name=request.granule_name.strip(),
+            polarization=request.polarization.upper(),
+            coordinates=coords,
+            job_ids=job_ids,
+            coherence_threshold=request.coherence_threshold,
+        )
+        result["aoi_area_km2"] = round(area_km2, 3)
+        return result
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if ("not complete" in message or "successful" in message) else 502
         raise HTTPException(status_code=status_code, detail=message) from exc
 
 

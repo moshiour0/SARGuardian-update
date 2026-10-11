@@ -26,6 +26,7 @@ LAYER_ALIASES: dict[str, tuple[str, ...]] = {
     "coherence": ("coherencemagnitude", "coherence"),
     "connected_components": ("connectedcomponents",),
     "ionosphere_phase_screen": ("ionospherephasescreen",),
+    "ionosphere_phase_screen_uncertainty": ("ionospherephasescreenuncertainty",),
     "mask": ("mask",),
 }
 
