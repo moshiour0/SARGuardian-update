@@ -55,3 +55,45 @@ def test_job_submit_requires_backend_earthdata_token(monkeypatch):
             granule_name=GRANULE, maturity="PROVISIONAL", polarization="HH",
             layer_role="unwrapped_phase", confirm_full_granule_layer=True,
         )
+
+
+def test_inspect_harmony_result_is_metadata_only_for_completed_job(monkeypatch):
+    job_id = "ea93e3fa-cffb-422a-91d6-953d6f3498cf"
+    result_url = (
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/"
+        + job_id + "/401715863/test_reformatted.tif"
+    )
+    monkeypatch.setattr(harmony_extraction, "get_harmony_job_status", lambda _: {
+        "job": {
+            "status": "successful",
+            "links": [{"rel": "data", "href": result_url, "title": "test.tif", "type": "image/tiff; profile=cloud-optimized", "bbox": [82.5, 27.4, 85.7, 30.1]}],
+        }
+    })
+    monkeypatch.setattr(harmony_extraction, "_inspect_result_headers", lambda _: {
+        "http_status": 200,
+        "content_length_bytes": 123456,
+        "content_length_mb": 0.118,
+        "size_known": True,
+        "note": "Headers only; no raster read.",
+    })
+    body = harmony_extraction.inspect_harmony_job_result(job_id)
+    assert body["ready"] is True
+    assert body["result_file_downloaded"] is False
+    assert body["scientific_analysis_performed"] is False
+    assert body["result"]["content_length_bytes"] == 123456
+    assert body["aoi_cropped"] is False
+
+
+def test_inspect_harmony_result_not_ready_does_not_probe_result(monkeypatch):
+    monkeypatch.setattr(harmony_extraction, "get_harmony_job_status", lambda _: {
+        "job": {"status": "running", "progress": 65}
+    })
+    monkeypatch.setattr(harmony_extraction, "_inspect_result_headers", lambda _: pytest.fail("Should not inspect pending job"))
+    body = harmony_extraction.inspect_harmony_job_result("ea93e3fa-cffb-422a-91d6-953d6f3498cf")
+    assert body["ready"] is False
+    assert body["progress"] == 65
+
+
+def test_inspect_result_rejects_untrusted_url():
+    with pytest.raises(HarmonyJobError, match="outside the approved public result path"):
+        harmony_extraction._trusted_harmony_result_url("https://example.com/a.tif")

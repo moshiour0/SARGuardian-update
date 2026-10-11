@@ -8,6 +8,9 @@ This API now provides two conservative preflight stages before any NISAR file is
 4. `POST /api/harmony/extract/start` — after an explicit confirmation, submits **one GUNW unwrapped-phase variable from one granule** to NASA Harmony as an asynchronous GeoTIFF job. It does not download the raster into SARGuardian.
 5. `GET /api/harmony/jobs/{job_id}` — reads the asynchronous job status metadata only. It never follows result links or downloads raster files.
 
+
+6. `GET /api/harmony/jobs/{job_id}/inspect-result` — for a completed job, inspects the result link's HTTP headers and known size using HEAD (or a one-byte Range probe only when needed). It never reads or stores the TIFF payload and reports clearly that the output is a full-granule layer, not an AOI crop.
+
 The current GUNW Harmony service advertises variable subsetting and GeoTIFF output, but does **not** advertise bounding-box or shape/AOI subsetting. Therefore the pilot job can create one full-granule layer output, not just the drawn 9.52 km² polygon. The job-start route requires `confirm_full_granule_layer=true` so this limitation is explicit. After a successful job, a later adapter must inspect result metadata, fetch/crop only a window from the Cloud-Optimized GeoTIFF if range access is supported, preserve georeferencing, and then feed compatible data into the preserved original `Backend/src/gunw_reader.py`. No displacement analysis is currently performed by the extraction endpoint.
 
 ## Run locally

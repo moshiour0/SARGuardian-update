@@ -241,3 +241,192 @@ def get_harmony_job_status(job_id: str) -> dict[str, Any]:
         raise HarmonyJobError(f"Harmony job-status request failed with HTTP {exc.code}; no result file was downloaded.") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise HarmonyJobError("Could not query Harmony job status because of a network/timeout error.") from exc
+
+
+
+def _trusted_harmony_result_url(value: Any) -> str:
+    """Validate a result URL before making a server-side HEAD/range request."""
+    if not isinstance(value, str):
+        raise HarmonyJobError("Harmony did not provide a result URL.")
+    parsed = urllib.parse.urlparse(value)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != "harmony.earthdata.nasa.gov"
+        or parsed.username is not None
+        or parsed.password is not None
+        or not parsed.path.startswith("/service-results/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HarmonyJobError("Harmony returned a result URL outside the approved public result path; refusing to request it.")
+    return value
+
+
+def _parse_content_range_total(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"bytes\s+\d+-\d+/(\d+|\*)", value.strip(), flags=re.IGNORECASE)
+    if not match or match.group(1) == "*":
+        return None
+    try:
+        number = int(match.group(1))
+        return number if number >= 0 else None
+    except ValueError:
+        return None
+
+
+def _inspect_result_headers(url: str) -> dict[str, Any]:
+    """Inspect result headers with HEAD, falling back to a one-byte Range probe.
+
+    It never reads a TIFF payload. Redirects are not followed to avoid accidentally
+    transferring a large data file or making requests to unvalidated hosts.
+    """
+    url = _trusted_harmony_result_url(url)
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "image/tiff, application/json;q=0.8, */*;q=0.1",
+        "Accept-Encoding": "identity",
+    }
+    head_status: int | None = None
+    head_headers: Any = {}
+    try:
+        req = urllib.request.Request(url, headers=headers, method="HEAD")
+        with urllib.request.build_opener(_NoRedirect()).open(req, timeout=TIMEOUT_SECONDS) as response:
+            head_status = getattr(response, "status", 200)
+            head_headers = response.headers
+    except urllib.error.HTTPError as exc:
+        head_status = exc.code
+        head_headers = exc.headers or {}
+        # A 405/501 may mean HEAD is not supported. Probe only one byte via Range.
+        if exc.code not in {405, 501}:
+            return {
+                "http_status": exc.code,
+                "content_length_bytes": None,
+                "content_range_total_bytes": None,
+                "content_type": head_headers.get("Content-Type"),
+                "accept_ranges": head_headers.get("Accept-Ranges"),
+                "last_modified": head_headers.get("Last-Modified"),
+                "size_known": False,
+                "note": "HEAD request did not provide result metadata; no raster bytes were read.",
+            }
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HarmonyJobError("Could not inspect Harmony result headers because of a network/timeout error. No TIFF bytes were downloaded.") from exc
+
+    total = None
+    try:
+        raw_length = head_headers.get("Content-Length")
+        if raw_length is not None:
+            length = int(raw_length)
+            if length >= 0:
+                total = length
+    except (TypeError, ValueError):
+        total = None
+
+    range_total = _parse_content_range_total(head_headers.get("Content-Range"))
+    probe_status: int | None = None
+    # Only probe if HEAD didn't reveal size and HEAD was unsupported; Range asks for a single byte.
+    if total is None and head_status in {405, 501}:
+        range_headers = dict(headers)
+        range_headers["Range"] = "bytes=0-0"
+        try:
+            req = urllib.request.Request(url, headers=range_headers, method="GET")
+            with urllib.request.build_opener(_NoRedirect()).open(req, timeout=TIMEOUT_SECONDS) as response:
+                probe_status = getattr(response, "status", 200)
+                range_total = _parse_content_range_total(response.headers.get("Content-Range"))
+                try:
+                    raw_length = response.headers.get("Content-Length")
+                    if range_total is None and raw_length is not None:
+                        # Content-Length for a 206 response is the one-byte response, not total size.
+                        if probe_status == 200:
+                            length = int(raw_length)
+                            if length >= 0:
+                                total = length
+                except (TypeError, ValueError):
+                    pass
+                # Intentionally do not call response.read(): closing a response prevents
+                # reading the raster body even if the server ignores the Range header.
+        except urllib.error.HTTPError as exc:
+            probe_status = exc.code
+            range_total = _parse_content_range_total((exc.headers or {}).get("Content-Range"))
+        except (urllib.error.URLError, TimeoutError, OSError):
+            probe_status = None
+
+    if total is None:
+        total = range_total
+    size_mb = round(total / (1024 * 1024), 3) if total is not None else None
+    size_gib = round(total / (1024 * 1024 * 1024), 4) if total is not None else None
+    content_type = head_headers.get("Content-Type")
+    return {
+        "http_status": head_status,
+        "range_probe_status": probe_status,
+        "content_length_bytes": total,
+        "content_length_mb": size_mb,
+        "content_length_gib": size_gib,
+        "content_range_total_bytes": range_total,
+        "content_type": content_type,
+        "accept_ranges": head_headers.get("Accept-Ranges"),
+        "last_modified": head_headers.get("Last-Modified"),
+        "size_known": total is not None,
+        "is_geotiff_like": "tiff" in str(content_type or "").lower(),
+        "note": "Headers only; SARGuardian did not download or store raster data.",
+    }
+
+
+def inspect_harmony_job_result(job_id: str) -> dict[str, Any]:
+    """Return one completed Harmony result's size and metadata without downloading it."""
+    status_payload = get_harmony_job_status(job_id)
+    job = status_payload.get("job") if isinstance(status_payload.get("job"), dict) else {}
+    job_status = str(job.get("status", "unknown")).lower()
+    common = {
+        "service": "SARGuardian Harmony result inspector",
+        "job_id": job_id,
+        "job_status": job_status,
+        "result_file_downloaded": False,
+        "scientific_analysis_performed": False,
+    }
+    if job_status not in {"successful", "completed", "complete"}:
+        return {
+            **common,
+            "ready": False,
+            "message": "Harmony result is not complete yet; check the job status later.",
+            "progress": job.get("progress"),
+            "job_message": job.get("message"),
+        }
+
+    links = job.get("links") if isinstance(job.get("links"), list) else []
+    result_link = next(
+        (
+            link for link in links
+            if isinstance(link, dict)
+            and str(link.get("rel", "")).lower() == "data"
+            and isinstance(link.get("href"), str)
+        ),
+        None,
+    )
+    if not result_link:
+        return {
+            **common,
+            "ready": True,
+            "size_known": False,
+            "message": "Harmony job completed but no direct data result link was found in the job metadata.",
+        }
+
+    url = _trusted_harmony_result_url(result_link.get("href"))
+    metadata = _inspect_result_headers(url)
+    bbox = result_link.get("bbox") if isinstance(result_link.get("bbox"), list) else None
+    temporal = result_link.get("temporal") if isinstance(result_link.get("temporal"), dict) else None
+    filename = str(result_link.get("title") or urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1]))
+    return {
+        **common,
+        "ready": True,
+        "result": {
+            "filename": filename,
+            "media_type": result_link.get("type"),
+            "profile": "cloud-optimized GeoTIFF" if "cloud-optimized" in str(result_link.get("type", "")).lower() else None,
+            "bbox_wgs84": bbox,
+            "temporal": temporal,
+            **metadata,
+        },
+        "aoi_cropped": False,
+        "message": "Result metadata inspected without downloading the GeoTIFF. This output covers the full granule layer, not only the selected AOI.",
+    }

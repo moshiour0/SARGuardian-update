@@ -20,7 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from harmony_preflight import get_harmony_capabilities, build_extraction_plan, HarmonyLookupError
-from harmony_extraction import submit_single_layer_job, get_harmony_job_status, HarmonyJobError
+from harmony_extraction import submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result, HarmonyJobError
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -461,6 +461,17 @@ def harmony_job_status(job_id: str) -> dict[str, Any]:
     """Read Harmony job status metadata only. This route never downloads outputs."""
     try:
         return get_harmony_job_status(job_id)
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.get("/api/harmony/jobs/{job_id}/inspect-result")
+def harmony_job_result_inspect(job_id: str) -> dict[str, Any]:
+    """Inspect completed result headers/size only; never download a TIFF."""
+    try:
+        return inspect_harmony_job_result(job_id)
     except HarmonyJobError as exc:
         message = str(exc)
         status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 502
