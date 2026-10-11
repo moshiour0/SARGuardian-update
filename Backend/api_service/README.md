@@ -92,3 +92,10 @@ pytest -q
 ```
 
 Tests use mocked ASF/Harmony responses. They check parsing, safety limits, ambiguous variables, and truthful no-download semantics; they do not make live NASA requests.
+
+
+## AOI window pilot (raw phase diagnostic only)
+
+`POST /api/harmony/jobs/{job_id}/crop-aoi` accepts the exact WGS84 polygon coordinates `[longitude, latitude]` selected in the frontend. After validating the completed Harmony job's trusted result link, the API resolves its temporary HTTPS CloudFront/S3 URL in memory and opens the Cloud-Optimized GeoTIFF through GDAL `/vsicurl/`. Rasterio reads only the intersecting AOI window using remote byte ranges, applies the polygon mask in memory, and returns grid/valid-pixel diagnostics plus raw unwrapped-phase summary statistics. It does not write a GeoTIFF, retain data, or claim to calculate displacement. Signed result URLs are never returned or logged.
+
+This endpoint requires `rasterio` and `numpy` in `api_service/requirements.txt`. It stops if the result is not a supported TIFF with HTTP byte-range access, the AOI does not intersect the raster, or the requested window exceeds 1,000,000 pixels. The summary is not a validated movement analysis: a single phase layer lacks matching coherence, connected-components, optional mask, ionosphere correction and reference-region data that the original `src/gunw_reader.py` expects. The next science step is to obtain aligned supporting layers, preserve georeferencing, and adapt their in-memory arrays to the existing reader's math and quality gates without converting phase to displacement prematurely.

@@ -536,3 +536,190 @@ def inspect_harmony_job_result(job_id: str) -> dict[str, Any]:
         "aoi_cropped": False,
         "message": "Result metadata inspected without downloading the GeoTIFF. This output covers the full granule layer, not only the selected AOI.",
     }
+
+
+def _resolve_result_url_for_window_read(job_id: str) -> tuple[str, dict[str, Any]]:
+    """Resolve a completed Harmony result to its temporary storage URL.
+
+    The signed URL is kept only in memory and must never be returned or logged.
+    A HEAD request follows the already-validated Harmony -> S3/CloudFront path;
+    no raster body is read here.
+    """
+    status_payload = get_harmony_job_status(job_id)
+    job = status_payload.get("job") if isinstance(status_payload.get("job"), dict) else {}
+    state = str(job.get("status", "unknown")).lower()
+    if state not in {"successful", "completed", "complete"}:
+        raise HarmonyJobError(f"Harmony job is not complete (status={state}); no raster pixels were read.")
+
+    links = job.get("links") if isinstance(job.get("links"), list) else []
+    link = next((item for item in links if isinstance(item, dict) and str(item.get("rel", "")).lower() == "data" and isinstance(item.get("href"), str)), None)
+    if not link:
+        raise HarmonyJobError("Completed Harmony job has no result data link.")
+    source_url = _trusted_harmony_result_url(link.get("href"))
+
+    headers = {
+        "Authorization": f"Bearer {_token()}",
+        "Accept": "image/tiff, application/json;q=0.8, */*;q=0.1",
+        "Accept-Encoding": "identity",
+        "User-Agent": USER_AGENT,
+    }
+    opener = urllib.request.build_opener(_SafeResultRedirect())
+    request = urllib.request.Request(source_url, headers=headers, method="HEAD")
+    try:
+        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+            final_url = response.geturl()
+            status = int(getattr(response, "status", 200))
+            content_type = str(response.headers.get("Content-Type", "")).lower()
+            accept_ranges = str(response.headers.get("Accept-Ranges", "")).lower()
+            if status < 200 or status >= 300:
+                raise HarmonyJobError(f"Result storage HEAD request returned HTTP {status}; no raster body was read.")
+            if "tiff" not in content_type and "geotiff" not in content_type:
+                raise HarmonyJobError("Resolved result is not served as a TIFF/GeoTIFF; no raster pixels were read.")
+            if "bytes" not in accept_ranges:
+                raise HarmonyJobError("Result storage does not advertise byte-range access. Windowed COG reading was stopped to avoid a full-file transfer.")
+    except urllib.error.HTTPError as exc:
+        if exc.code in {301, 302, 303, 307, 308} and getattr(opener, "handlers", None):
+            raise HarmonyJobError("Result redirect could not be resolved to an approved storage host; no raster pixels were read.") from exc
+        raise HarmonyJobError(f"Result storage could not be resolved (HTTP {exc.code}); no raster pixels were read.") from exc
+    except HarmonyJobError:
+        raise
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise HarmonyJobError("Could not resolve the temporary result URL due to a network/timeout issue; no raster pixels were read.") from exc
+
+    # Must end at an approved storage host after _SafeResultRedirect validated
+    # every hop. Do not permit GDAL to follow a new, unvalidated redirect from
+    # the original Harmony endpoint. The final URL may contain a signed query;
+    # keep it only in memory and never include it in logs or the response.
+    parsed = urllib.parse.urlparse(final_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    valid_cloudfront = bool(re.fullmatch(r"[a-z0-9]{13}\.cloudfront\.net", host))
+    valid_s3 = host == "s3.amazonaws.com" or host.endswith(".s3.amazonaws.com") or bool(re.fullmatch(r"s3[.-][a-z0-9-]+\.amazonaws\.com", host)) or bool(re.fullmatch(r"[a-z0-9.-]+\.s3[.-][a-z0-9-]+\.amazonaws\.com", host))
+    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.fragment or not (valid_cloudfront or valid_s3):
+        raise HarmonyJobError("Resolved result is not on an approved HTTPS CloudFront/S3 host; windowed read refused.")
+    return final_url, link
+
+
+def inspect_cog_aoi(source: str, coordinates: list[tuple[float, float]], max_window_pixels: int = 1_000_000) -> dict[str, Any]:
+    """Read only the COG window intersecting a WGS84 polygon; never persist raster data.
+
+    `source` may be a local GeoTIFF path for tests, or a GDAL /vsicurl/ URL in
+    production. The returned values are descriptive statistics for raw phase,
+    not displacement or landslide conclusions.
+    """
+    try:
+        import numpy as np
+        import rasterio
+        from rasterio.errors import WindowError
+        from rasterio.features import geometry_mask, geometry_window
+        from rasterio.warp import transform_geom, transform_bounds
+    except ImportError as exc:
+        raise HarmonyJobError("AOI window inspection requires rasterio and numpy; install Backend API requirements and redeploy.") from exc
+
+    ring = list(coordinates)
+    if len(ring) >= 3 and ring[0] != ring[-1]:
+        ring.append(ring[0])
+    polygon = {"type": "Polygon", "coordinates": [[list(point) for point in ring]]}
+
+    try:
+        with rasterio.Env(
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            CPL_VSIL_CURL_USE_HEAD="YES",
+            CPL_VSIL_CURL_ALLOWED_EXTENSIONS=".tif,.tiff",
+            GDAL_HTTP_MAX_RETRY="2",
+            GDAL_HTTP_TIMEOUT="25",
+            CPL_CURL_VERBOSE="NO",
+        ):
+            # A production source begins with /vsicurl/ and reaches the final
+            # approved CloudFront/S3 URL, allowing GDAL to use HTTP Range reads.
+            with rasterio.open(source, sharing=False) as dataset:
+                if dataset.driver != "GTiff" or dataset.count < 1:
+                    raise HarmonyJobError("Result is not a readable single/multiband GeoTIFF.")
+                if dataset.crs is None:
+                    raise HarmonyJobError("GeoTIFF has no CRS; refusing to apply a geographic AOI to an unknown grid.")
+                native_polygon = transform_geom("EPSG:4326", dataset.crs, polygon, precision=8)
+                try:
+                    window = geometry_window(dataset, [native_polygon], pad_x=0, pad_y=0)
+                except WindowError as exc:
+                    raise HarmonyJobError("The selected AOI does not intersect the result raster extent.") from exc
+                width, height = int(window.width), int(window.height)
+                if width <= 0 or height <= 0:
+                    raise HarmonyJobError("The AOI intersects no raster pixels.")
+                window_pixels = width * height
+                if window_pixels > max_window_pixels:
+                    raise HarmonyJobError(
+                        f"AOI window is {window_pixels:,} pixels, above the safe cap of {max_window_pixels:,}. "
+                        "Use a smaller AOI before reading raster pixels."
+                    )
+                data = dataset.read(1, window=window, masked=True)
+                inside = geometry_mask(
+                    [native_polygon],
+                    out_shape=(height, width),
+                    transform=dataset.window_transform(window),
+                    invert=True,
+                    all_touched=False,
+                )
+                values = np.asarray(data.data, dtype=np.float64)
+                data_mask = np.ma.getmaskarray(data)
+                valid = inside & ~data_mask & np.isfinite(values)
+                count = int(valid.sum())
+                raw_stats = None
+                if count:
+                    sample = values[valid]
+                    raw_stats = {
+                        "min": float(np.min(sample)),
+                        "max": float(np.max(sample)),
+                        "mean": float(np.mean(sample)),
+                        "std": float(np.std(sample)),
+                        "unit": "raw unwrapped-phase value; treated as radians by the product variable name, not converted to displacement",
+                    }
+                bounds = transform_bounds(dataset.crs, "EPSG:4326", *dataset.window_bounds(window), densify_pts=21)
+                return {
+                    "source_driver": dataset.driver,
+                    "source_crs": str(dataset.crs),
+                    "source_width": int(dataset.width),
+                    "source_height": int(dataset.height),
+                    "source_nodata": float(dataset.nodata) if dataset.nodata is not None else None,
+                    "aoi_window": {"width": width, "height": height, "window_pixels": window_pixels},
+                    "aoi_window_bounds_wgs84": [float(v) for v in bounds],
+                    "pixels_inside_polygon": int(inside.sum()),
+                    "valid_unmasked_pixels": count,
+                    "valid_fraction_of_polygon_pixels": round(count / max(1, int(inside.sum())), 6),
+                    "raw_phase_diagnostic_statistics": raw_stats,
+                    "aoi_window_read_from_remote_cog": source.startswith("/vsicurl/"),
+                    "full_raster_downloaded": False,
+                    "temporary_raster_file_created": False,
+                    "persistent_storage_used": False,
+                    "scientific_displacement_analysis_performed": False,
+                    "warning": (
+                        "This is an AOI-clipped raw phase diagnostic only. It is not LOS displacement or landslide detection. "
+                        "The current one-layer output lacks the paired coherence, connected-components, ionosphere and source-product metadata required by the original GUNW scientific reader."
+                    ),
+                }
+    except HarmonyJobError:
+        raise
+    except Exception as exc:
+        # Do not return raw GDAL errors because they can contain a signed URL.
+        raise HarmonyJobError(
+            f"Could not read the requested AOI window from the GeoTIFF ({type(exc).__name__}). "
+            "No full raster was intentionally downloaded or persisted. Check result URL expiry and remote byte-range support."
+        ) from exc
+
+
+def crop_harmony_job_result_aoi(job_id: str, coordinates: list[tuple[float, float]]) -> dict[str, Any]:
+    """Read a bounded AOI window from a successful remote COG without saving it."""
+    final_url, link = _resolve_result_url_for_window_read(job_id)
+    # GDAL receives only the resolved temporary result URL. Do not return or log it.
+    remote_source = "/vsicurl/" + final_url
+    crop = inspect_cog_aoi(remote_source, coordinates)
+    return {
+        "service": "SARGuardian remote COG AOI window inspector",
+        "job_id": job_id,
+        "job_status": "successful",
+        "result_filename": str(link.get("title", "")),
+        "aoi_cropped": True,
+        "crop_representation": "in-memory pixel window and polygon mask; no output TIFF persisted",
+        "result_file_downloaded": False,
+        "raster_window_pixels_read": True,
+        "scientific_analysis_performed": False,
+        **crop,
+    }

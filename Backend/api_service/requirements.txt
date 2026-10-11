@@ -1,2 +1,3 @@
 fastapi==0.128.2
 uvicorn==0.48.0
+rasterio==1.4.4

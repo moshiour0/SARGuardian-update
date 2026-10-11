@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
 import type { User } from 'firebase/auth';
-import { searchNisarCatalog } from '../../src/api/catalog';
-import type { CatalogResponse, NisarProductType } from '../../src/api/catalog';
+import { inspectNisarAoiWindow, searchNisarCatalog } from '../../src/api/catalog';
+import type { AoiWindowResponse, CatalogResponse, NisarProductType } from '../../src/api/catalog';
 import { investigate } from '../engine/adapter';
 import { calculateGeodesicAreaKm2, timestampToRequest, validateAnalysisRequest, validatePolyline } from '../engine/validation';
 import type { AnalysisRequest, Coordinate, InvestigationPolyline, InvestigationResult, LocationSelection, TimestampSelection } from '../engine/types';
@@ -365,6 +365,72 @@ function CatalogPreflightPanel({ result, onClose }: { result: CatalogResponse; o
   );
 }
 
+function AoiWindowPanel({
+  coordinates,
+  areaClosed,
+  jobId,
+  onJobIdChange,
+  isLoading,
+  error,
+  result,
+  onRun,
+}: {
+  coordinates: Coordinate[];
+  areaClosed: boolean;
+  jobId: string;
+  onJobIdChange: (value: string) => void;
+  isLoading: boolean;
+  error: string;
+  result: AoiWindowResponse | null;
+  onRun: () => void;
+}) {
+  return (
+    <div className="aoi-window-panel" aria-live="polite">
+      <div className="catalog-preflight-heading">
+        <div>
+          <span className="result-kicker">REMOTE COG · AOI WINDOW PILOT</span>
+          <h3>Read the selected area from a completed GUNW result</h3>
+        </div>
+      </div>
+      <p className="catalog-notice">This reads only the pixels intersecting your polygon from the remote Cloud-Optimized GeoTIFF where HTTP byte-range access works. It does not save the TIFF or calculate landslide displacement.</p>
+      <label className="aoi-job-label">
+        <span>Harmony Job ID</span>
+        <input
+          value={jobId}
+          onChange={(event) => onJobIdChange(event.target.value)}
+          placeholder="Paste the successful Harmony job ID"
+          autoComplete="off"
+          spellCheck={false}
+        />
+      </label>
+      <button className="investigate-button aoi-window-button" type="button" disabled={!areaClosed || coordinates.length < 3 || !jobId.trim() || isLoading} onClick={onRun}>
+        {isLoading ? 'Reading AOI window…' : 'Read selected AOI window'}
+      </button>
+      {!areaClosed && <p className="action-hint">Close the polygon first to send its coordinates.</p>}
+      {error && <p className="catalog-error" role="alert">{error}</p>}
+      {result && (
+        <div className="aoi-window-result">
+          <strong>AOI window returned</strong>
+          <div className="catalog-stats">
+            <div><span>Window</span><strong>{result.aoi_window ? `${result.aoi_window.width} × ${result.aoi_window.height} px` : 'Not available'}</strong></div>
+            <div><span>Polygon pixels</span><strong>{result.pixels_inside_polygon ?? '—'}</strong></div>
+            <div><span>Valid phase pixels</span><strong>{result.valid_unmasked_pixels ?? '—'}</strong></div>
+          </div>
+          {result.raw_phase_diagnostic_statistics && (
+            <div className="catalog-stats">
+              <div><span>Raw phase min</span><strong>{result.raw_phase_diagnostic_statistics.min.toFixed(4)}</strong></div>
+              <div><span>Raw phase max</span><strong>{result.raw_phase_diagnostic_statistics.max.toFixed(4)}</strong></div>
+              <div><span>Raw phase mean</span><strong>{result.raw_phase_diagnostic_statistics.mean.toFixed(4)}</strong></div>
+            </div>
+          )}
+          <p className="catalog-warning">{result.warning || 'Raw phase diagnostics only; this is not a displacement or landslide finding.'}</p>
+          <small className="aoi-window-meta">CRS: {result.source_crs || 'unknown'} · Persistent storage: {result.persistent_storage_used ? 'used' : 'not used'} · Full raster downloaded: {result.full_raster_downloaded ? 'yes' : 'no'}</small>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome: () => void; onSignOut: () => void }) {
   const [searchText, setSearchText] = useState('');
   const [location, setLocation] = useState<LocationSelection | null>(null);
@@ -385,6 +451,10 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const [catalogResult, setCatalogResult] = useState<CatalogResponse | null>(null);
   const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
+  const [harmonyJobId, setHarmonyJobId] = useState('');
+  const [aoiWindowResult, setAoiWindowResult] = useState<AoiWindowResponse | null>(null);
+  const [isAoiWindowLoading, setIsAoiWindowLoading] = useState(false);
+  const [aoiWindowError, setAoiWindowError] = useState('');
   const mapRef = useRef<google.maps.Map | null>(null);
 
   useEffect(() => {
@@ -437,6 +507,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setResult(null);
     setCatalogResult(null);
     setCatalogError('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     setError('');
   };
 
@@ -474,6 +546,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setResult(null);
     setCatalogResult(null);
     setCatalogError('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
   };
 
   const handleWindowEndChange = (value: string) => {
@@ -481,6 +555,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setResult(null);
     setCatalogResult(null);
     setCatalogError('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     if (windowStart && value < windowStart) setError('Ending date cannot be before starting date.');
     else if (value > today) setError('Ending date cannot be after today.');
     else setError('');
@@ -493,6 +569,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setResult(null);
     setCatalogResult(null);
     setCatalogError('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     setError('');
   };
 
@@ -504,6 +582,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setResult(null);
     setCatalogResult(null);
     setCatalogError('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     setError('');
   };
 
@@ -515,6 +595,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     });
     setAreaClosed(false);
     setResult(null);
+    setCatalogResult(null);
+    setAoiWindowResult(null);
+    setAoiWindowError('');
   };
 
   const clearGeometry = () => {
@@ -523,6 +606,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setDrawing(false);
     setSelectedVertexIndex(null);
     setResult(null);
+    setCatalogResult(null);
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     setError('');
   };
 
@@ -562,6 +648,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
 
     setCatalogError('');
     setResult(null);
+    setAoiWindowResult(null);
+    setAoiWindowError('');
     setIsCatalogLoading(true);
     setCatalogResult(null);
     try {
@@ -576,6 +664,27 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
       setCatalogError(error instanceof Error ? error.message : 'Could not check the NISAR catalogue.');
     } finally {
       setIsCatalogLoading(false);
+    }
+  };
+
+  const runAoiWindowRead = async () => {
+    if (!areaClosed || coordinates.length < 3) {
+      setAoiWindowError('Close the polygon before reading its raster window.');
+      return;
+    }
+    setAoiWindowError('');
+    setAoiWindowResult(null);
+    setIsAoiWindowLoading(true);
+    try {
+      const response = await inspectNisarAoiWindow({
+        jobId: harmonyJobId,
+        coordinates: [...coordinates, coordinates[0]],
+      });
+      setAoiWindowResult(response);
+    } catch (error) {
+      setAoiWindowError(error instanceof Error ? error.message : 'Could not read the selected AOI window.');
+    } finally {
+      setIsAoiWindowLoading(false);
     }
   };
 
@@ -724,7 +833,7 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                 </div>
                 <label className="dataset-selector">
                   <span>Data family</span>
-                  <select value={productType} onChange={(event) => { setProductType(event.target.value as NisarProductType); setCatalogResult(null); setCatalogError(''); }} aria-label="NISAR product family">
+                  <select value={productType} onChange={(event) => { setProductType(event.target.value as NisarProductType); setCatalogResult(null); setCatalogError(''); setAoiWindowResult(null); setAoiWindowError(''); }} aria-label="NISAR product family">
                     <option value="GUNW">GUNW · interferometry</option>
                     <option value="GOFF">GOFF · pixel offsets</option>
                   </select>
@@ -737,6 +846,18 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                 {!catalogEligible && <p className="action-hint" role="status">{catalogDisabledReason}</p>}
               </div>
               {catalogResult && <CatalogPreflightPanel result={catalogResult} onClose={() => setCatalogResult(null)} />}
+              {catalogResult && productType === 'GUNW' && (
+                <AoiWindowPanel
+                  coordinates={coordinates}
+                  areaClosed={areaClosed}
+                  jobId={harmonyJobId}
+                  onJobIdChange={(value) => { setHarmonyJobId(value); setAoiWindowResult(null); setAoiWindowError(''); }}
+                  isLoading={isAoiWindowLoading}
+                  error={aoiWindowError}
+                  result={aoiWindowResult}
+                  onRun={runAoiWindowRead}
+                />
+              )}
               {catalogError && <p className="catalog-error" role="alert">{catalogError}</p>}
             </>
           ) : (

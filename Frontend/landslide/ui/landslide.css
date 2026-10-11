@@ -70,3 +70,19 @@
   .catalog-product-main strong { max-width: 62vw; }
   .catalog-product-row > span { font-size: 9px; }
 }
+
+
+/* Remote COG AOI-window pilot: raw-phase diagnostics only. */
+.aoi-window-panel { grid-column: 1 / -1; min-width: 0; max-height: min(34vh, 360px); overflow: auto; padding: 12px; border: 1px solid rgba(174,216,255,.32); border-radius: 5px; background: rgba(3,32,43,.82); }
+.aoi-window-panel h3 { margin: 5px 0 0; color: #f1fbff; font: 700 15px 'Manrope', sans-serif; }
+.aoi-window-panel .catalog-notice { margin-top: 10px; }
+.aoi-job-label { display: grid; gap: 5px; margin: 10px 0; }
+.aoi-job-label span { color: #a9d8f7; font-size: 9px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.aoi-job-label input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 36px; padding: 8px; border: 1px solid rgba(226,255,240,.26); border-radius: 4px; background: rgba(4,48,53,.78); color: #f2fff7; font: 11px monospace; }
+.aoi-window-button { width: 100%; min-height: 36px; }
+.aoi-window-button:disabled { opacity: .45; cursor: not-allowed; }
+.aoi-window-result { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(235,255,245,.18); }
+.aoi-window-result > strong { display: block; color: #b4f1d3; font: 700 12px 'Manrope', sans-serif; }
+.aoi-window-meta { display: block; color: rgba(238,255,245,.62); font-size: 9px; line-height: 1.5; overflow-wrap: anywhere; }
+@media (max-width: 1020px) { .aoi-window-panel { grid-column: 1 / -1; } }
+@media (max-width: 640px) { .aoi-window-panel { max-height: 28vh; padding: 9px; } .aoi-window-panel h3 { font-size: 13px; } }

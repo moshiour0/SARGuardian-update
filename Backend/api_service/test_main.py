@@ -15,8 +15,8 @@ def test_health_is_metadata_only():
     response = client.get("/health")
     assert response.status_code == 200
     body = response.json()
-    assert body["mode"] == "metadata-only"
-    assert body["data_downloaded"] is False
+    assert body["mode"] == "metadata-plus-on-demand-window-read"
+    assert body["full_raster_downloaded_or_persisted"] is False
 
 
 def test_catalog_preflight_returns_metadata_and_volume_without_downloading(monkeypatch):
@@ -102,3 +102,44 @@ def test_rejects_area_above_limit():
     )
     assert response.status_code == 422
     assert "free demo limit" in response.text
+
+
+def test_crop_aoi_endpoint_validates_polygon_and_returns_window_result(monkeypatch):
+    captured = {}
+
+    def fake_crop(job_id, coords):
+        captured["job_id"] = job_id
+        captured["coords"] = coords
+        return {
+            "service": "SARGuardian remote COG AOI window inspector",
+            "aoi_cropped": True,
+            "full_raster_downloaded": False,
+            "scientific_analysis_performed": False,
+            "aoi_window": {"width": 20, "height": 18, "window_pixels": 360},
+        }
+
+    monkeypatch.setattr(main, "crop_harmony_job_result_aoi", fake_crop)
+    response = client.post(
+        "/api/harmony/jobs/ea93e3fa-cffb-422a-91d6-953d6f3498cf/crop-aoi",
+        json={"coordinates": square()},
+        headers={"x-forwarded-for": "test-crop-window-1"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["aoi_cropped"] is True
+    assert body["aoi_area_km2"] > 0
+    assert captured["job_id"] == "ea93e3fa-cffb-422a-91d6-953d6f3498cf"
+    assert len(captured["coords"]) == 4
+
+
+def test_crop_aoi_endpoint_rejects_invalid_polygon(monkeypatch):
+    monkeypatch.setattr(
+        main, "crop_harmony_job_result_aoi",
+        lambda *args: (_ for _ in ()).throw(AssertionError("Should reject before remote read")),
+    )
+    response = client.post(
+        "/api/harmony/jobs/ea93e3fa-cffb-422a-91d6-953d6f3498cf/crop-aoi",
+        json={"coordinates": [[0, 0], [0.1, 0.1]]},
+        headers={"x-forwarded-for": "test-crop-window-2"},
+    )
+    assert response.status_code == 422

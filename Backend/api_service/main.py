@@ -20,7 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from harmony_preflight import get_harmony_capabilities, build_extraction_plan, HarmonyLookupError
-from harmony_extraction import submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result, HarmonyJobError
+from harmony_extraction import submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result, crop_harmony_job_result_aoi, HarmonyJobError
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -40,9 +40,10 @@ app = FastAPI(
     title="SARGuardian ASF + Harmony Pilot API",
     version="0.3.0",
     description=(
-        "Searches ASF metadata, discovers NASA Harmony capabilities, and can submit an explicitly "
-        "confirmed one-granule/one-variable Harmony extraction job. SARGuardian does not download "
-        "the output raster or run scientific analysis in this stage."
+        "Searches ASF metadata, discovers NASA Harmony capabilities, submits an explicitly confirmed "
+        "one-granule/one-variable extraction, and can read a bounded AOI window from a completed "
+        "Cloud-Optimized GeoTIFF using remote byte ranges. It does not persist raster files or claim "
+        "to perform validated displacement analysis from a single phase layer."
     ),
 )
 
@@ -82,6 +83,13 @@ class HarmonyPlanRequest(BaseModel):
     product_type: str = Field(default="GUNW", description="Pilot currently supports GUNW only.")
     maturity: str = Field(default="PROVISIONAL", description="CMR collection maturity: PROVISIONAL or BETA.")
     polarization: str = Field(default="HH", description="GUNW polarization to resolve consistently: HH or VV.")
+
+
+class HarmonyAOICropRequest(BaseModel):
+    coordinates: list[tuple[float, float]] = Field(
+        min_length=3,
+        description="Polygon vertices in [longitude, latitude] WGS84. A closed ring may repeat the first vertex.",
+    )
 
 
 class HarmonyExtractStartRequest(BaseModel):
@@ -247,11 +255,12 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "service": "SARGuardian ASF + Harmony preflight",
-        "mode": "metadata-only",
-        "data_downloaded": False,
+        "mode": "metadata-plus-on-demand-window-read",
+        "full_raster_downloaded_or_persisted": False,
         "scientific_analysis_performed": False,
         "harmony_capability_discovery": True,
         "single_granule_extraction": "guarded-one-layer-job-submission-available",
+        "aoi_window_read": "available-for-completed-range-enabled-geotiff-results",
         "earthdata_token_configured": bool(os.getenv("EARTHDATA_TOKEN", "").strip()),
         "original_scientific_engine_present": True,
         "max_time_window_days": MAX_DAYS,
@@ -475,4 +484,33 @@ def harmony_job_result_inspect(job_id: str) -> dict[str, Any]:
     except HarmonyJobError as exc:
         message = str(exc)
         status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.post("/api/harmony/jobs/{job_id}/crop-aoi")
+def harmony_job_crop_aoi(job_id: str, request: HarmonyAOICropRequest, http_request: Request) -> dict[str, Any]:
+    """Read only the selected AOI window from a completed COG using remote byte ranges.
+
+    No full result is downloaded or persisted, and this endpoint does not
+    interpret raw phase as displacement.
+    """
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    _check_rate_limit("crop:" + (forwarded or client_ip))
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    _coords, _start, _end, area_km2 = _validate_search(
+        CatalogSearchRequest(
+            coordinates=request.coordinates,
+            start_date=today_utc,
+            end_date=today_utc,
+            product_type="GUNW",
+        )
+    )
+    try:
+        result = crop_harmony_job_result_aoi(job_id, _coords)
+        result["aoi_area_km2"] = round(area_km2, 3)
+        return result
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if "not complete" in message else 502
         raise HTTPException(status_code=status_code, detail=message) from exc
