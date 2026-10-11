@@ -49,25 +49,58 @@ class _SafeResultRedirect(urllib.request.HTTPRedirectHandler):
         self.rejected_host: str | None = None
 
     @staticmethod
-    def _approved(url: str) -> bool:
+    def _approved(url: str, source_url: str | None = None) -> bool:
+        """Validate an HTTPS redirect target against a narrow host allowlist.
+
+        Harmony result links can redirect from the trusted /service-results/ path
+        to a CloudFront distribution used for staged output. Permit only a normal
+        13-character CloudFront distribution hostname, and only when the redirect
+        originates directly from the trusted Harmony result URL. Do not permit a
+        CloudFront URL to redirect onward to another host.
+        """
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").lower().rstrip(".")
         if parsed.scheme != "https" or not host or parsed.username is not None or parsed.password is not None:
             return False
-        if parsed.port not in (None, 443):
+        try:
+            if parsed.port not in (None, 443):
+                return False
+        except ValueError:
             return False
-        return (
+
+        if (
             host == "harmony.earthdata.nasa.gov"
             or host == "amazonaws.com"
             or host.endswith(".amazonaws.com")
+        ):
+            return True
+
+        # Harmony has been observed returning result links through a dedicated
+        # CloudFront distribution (e.g. dqzb5lcolc8fj.cloudfront.net). A strict
+        # distribution-ID pattern is safer than accepting every *.cloudfront.net
+        # redirect from arbitrary sources.
+        source = urllib.parse.urlparse(source_url or "")
+        source_host = (source.hostname or "").lower().rstrip(".")
+        source_path = source.path or ""
+        is_harmony_result_source = (
+            source.scheme == "https"
+            and source_host == "harmony.earthdata.nasa.gov"
+            and source_path.startswith("/service-results/")
+            and source.username is None
+            and source.password is None
+            and not source.fragment
+        )
+        return bool(
+            is_harmony_result_source
+            and re.fullmatch(r"[a-z0-9]{13}\.cloudfront\.net", host)
         )
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        if not self._approved(newurl):
+        if not self._approved(newurl, source_url=req.full_url):
             parsed_target = urllib.parse.urlparse(newurl)
             self.rejected_host = (parsed_target.hostname or "unknown").lower().rstrip(".")
             self.rejected_reason = (
-                "Redirect target host was outside the approved HTTPS Harmony/AWS S3 hosts; "
+                "Redirect target host was outside the approved HTTPS Harmony/AWS S3/validated CloudFront hosts; "
                 "it was not contacted. Only the hostname is reported for diagnosis."
             )
             return None

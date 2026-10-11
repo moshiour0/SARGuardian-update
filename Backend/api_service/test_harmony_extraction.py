@@ -169,3 +169,46 @@ def test_rejected_redirect_exposes_host_only_not_path_or_query():
     assert handler.redirect_request(req, None, 303, "See Other", {}, target) is None
     assert handler.rejected_host == "urs.earthdata.nasa.gov"
     assert "never-report" not in handler.rejected_reason
+
+
+
+def test_safe_result_redirect_allows_cloudfront_only_from_harmony_result_path():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/job/file.tif",
+        headers={
+            "Range": "bytes=0-0",
+            "Authorization": "Bearer do-not-forward",
+            "Cookie": "do-not-forward=secret",
+        },
+        method="HEAD",
+    )
+    target = "https://dqzb5lcolc8fj.cloudfront.net/private/signed-object?signature=do-not-log"
+    redirected = handler.redirect_request(req, None, 307, "Temporary Redirect", {}, target)
+    assert redirected is not None
+    assert redirected.full_url == target
+    assert "Authorization" not in redirected.headers
+    assert "Cookie" not in redirected.headers
+    assert handler.followed == [{"status": 307, "host": "dqzb5lcolc8fj.cloudfront.net"}]
+
+
+def test_safe_result_redirect_rejects_cloudfront_from_non_harmony_source():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/jobs/some-job",
+        method="HEAD",
+    )
+    target = "https://dqzb5lcolc8fj.cloudfront.net/file.tif?signature=secret"
+    assert handler.redirect_request(req, None, 307, "Temporary Redirect", {}, target) is None
+    assert handler.rejected_host == "dqzb5lcolc8fj.cloudfront.net"
+
+
+def test_safe_result_redirect_rejects_malformed_cloudfront_host():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/job/file.tif",
+        method="HEAD",
+    )
+    target = "https://attacker.cloudfront.net/file.tif"
+    assert handler.redirect_request(req, None, 307, "Temporary Redirect", {}, target) is None
+    assert handler.rejected_host == "attacker.cloudfront.net"
