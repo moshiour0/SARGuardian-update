@@ -68,17 +68,37 @@ def test_extraction_plan_is_single_granule_and_does_not_claim_analysis(monkeypat
     assert body["selected_layer_count"] == 5
 
 
-def test_ambiguous_phase_layers_are_not_guessed(monkeypatch):
-    ambiguous = dict(SAMPLE_CAPABILITIES)
-    ambiguous["variables"] = list(SAMPLE_CAPABILITIES["variables"]) + [
-        {"name": "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/VV/unwrappedPhase"}
+def test_explicit_polarization_resolves_hh_and_does_not_mix_vv(monkeypatch):
+    with_both_polarizations = dict(SAMPLE_CAPABILITIES)
+    with_both_polarizations["variables"] = list(SAMPLE_CAPABILITIES["variables"]) + [
+        {"name": "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/VV/unwrappedPhase"},
+        {"name": "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/VV/coherenceMagnitude"},
     ]
-    monkeypatch.setattr(harmony_preflight, "_http_json", lambda _url: ambiguous)
+    monkeypatch.setattr(harmony_preflight, "_http_json", lambda _url: with_both_polarizations)
     harmony_preflight._cached_capabilities.cache_clear()
 
+    payload = harmony_preflight.get_harmony_capabilities("GUNW", "PR", polarization="HH")
+    assert payload["scientific_layers"]["unwrapped_phase"].endswith("/HH/unwrappedPhase")
+    assert payload["scientific_layers"]["coherence"].endswith("/HH/coherenceMagnitude")
+    assert payload["polarization_selected"] == "HH"
+
+
+def test_v3_nested_service_capabilities_are_parsed(monkeypatch):
+    v3 = dict(SAMPLE_CAPABILITIES)
+    v3["summary"] = {"subsetting": {"variable": False, "bbox": False, "shape": False}, "outputFormats": ["image/tiff"]}
+    v3["services"] = [{
+        "name": "net2cog",
+        "referenceUrl": "https://cmr.earthdata.nasa.gov/search/concepts/S3177988677-POCLOUD",
+        "capabilities": {"subsetting": {"variable": True, "bbox": False, "shape": False, "temporal": False},
+                         "outputFormats": ["image/tiff"]},
+    }]
+    monkeypatch.setattr(harmony_preflight, "_http_json", lambda _url: v3)
+    harmony_preflight._cached_capabilities.cache_clear()
     payload = harmony_preflight.get_harmony_capabilities("GUNW", "PR")
-    assert payload["scientific_layers"]["unwrapped_phase"] is None
-    assert payload["minimum_gunw_pilot_ready"] is False
+    assert payload["capabilities"]["variable_subset"] is True
+    assert payload["capabilities"]["bbox_subset"] is False
+    assert payload["supports_geotiff_output"] is True
+    assert payload["minimum_gunw_pilot_ready"] is True
 
 
 def test_bad_granule_is_rejected_before_harmony_lookup(monkeypatch):

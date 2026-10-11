@@ -128,23 +128,54 @@ def _extract_variable_values(node: Any) -> list[str]:
 
 
 def _service_capabilities(payload: dict[str, Any]) -> dict[str, bool]:
+    """Normalize Harmony capability schema v3 plus legacy v1/v2 responses.
+
+    Version 3 nests subsetting flags under ``summary.subsetting`` and
+    ``services[].capabilities.subsetting``. Older code only inspected flat
+    ``variableSubset``-style names and incorrectly reported false for v3.
+    """
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     service_list = payload.get("services") if isinstance(payload.get("services"), list) else []
-    aliases = {
-        "variable_subset": ("variableSubset", "variable_subset", "variableSubsetting"),
-        "bbox_subset": ("bboxSubset", "bbox_subset", "boundingBoxSubset"),
-        "shape_subset": ("shapeSubset", "shape_subset", "polygonSubset"),
-        "temporal_subset": ("temporalSubset", "temporal_subset"),
+
+    output: dict[str, bool] = {
+        "variable_subset": False,
+        "bbox_subset": False,
+        "shape_subset": False,
+        "temporal_subset": False,
     }
-    output: dict[str, bool] = {}
-    for normalized, keys in aliases.items():
-        values = [summary.get(k) for k in keys if k in summary]
-        values.extend(payload.get(k) for k in keys if k in payload)
-        for service in service_list:
-            if not isinstance(service, dict):
-                continue
-            caps = service.get("capabilities") if isinstance(service.get("capabilities"), dict) else service
-            values.extend(caps.get(k) for k in keys if k in caps)
+    key_map = {
+        "variable_subset": ("variable", "variableSubset", "variable_subset", "variableSubsetting"),
+        "bbox_subset": ("bbox", "bboxSubset", "bbox_subset", "boundingBoxSubset"),
+        "shape_subset": ("shape", "shapeSubset", "shape_subset", "polygonSubset"),
+        "temporal_subset": ("temporal", "temporalSubset", "temporal_subset"),
+    }
+
+    nodes: list[dict[str, Any]] = [payload, summary]
+    # v3 summary often expresses output and subsetting capabilities as nested
+    # structures. Include all common variants without assuming undocumented keys.
+    for parent in (payload, summary):
+        for child_key in ("subsetting", "capabilities", "operations"):
+            child = parent.get(child_key)
+            if isinstance(child, dict):
+                nodes.append(child)
+    for service in service_list:
+        if not isinstance(service, dict):
+            continue
+        nodes.append(service)
+        caps = service.get("capabilities")
+        if isinstance(caps, dict):
+            nodes.append(caps)
+            for child_key in ("subsetting", "operations"):
+                child = caps.get(child_key)
+                if isinstance(child, dict):
+                    nodes.append(child)
+
+    for normalized, aliases in key_map.items():
+        values: list[Any] = []
+        for node in nodes:
+            for key in aliases:
+                if key in node:
+                    values.append(node[key])
         output[normalized] = any(value is True for value in values)
     return output
 
@@ -154,27 +185,52 @@ def _normalize_variables(values: list[str]) -> list[str]:
     return sorted(set(values), key=lambda value: (0 if "/" in value else 1, len(value), value.lower()))
 
 
-def _resolve_layer(alias_values: list[str], layer_role: str) -> str | None:
+def _resolve_layer(alias_values: list[str], layer_role: str, polarization: str = "HH") -> str | None:
+    """Resolve a GUNW layer for one explicitly selected polarization.
+
+    The NISAR GUNW capability list commonly contains HH and VV equivalents.
+    The first reader version prefers the first frequency-A polarization found
+    in the HDF5 tree (commonly HH); for an auditable API plan we select HH by
+    default, allow VV explicitly, and never mix polarizations between layers.
+    The unwrapped-grid mask is a grid-level variable, not a polarization child.
+    """
     aliases = LAYER_ALIASES[layer_role]
-    matches = []
+    pol = polarization.upper()
+    matches: list[str] = []
     for value in alias_values:
         low = value.lower().rstrip("/")
         basename = low.split("/")[-1].split(":")[-1]
-        if any(basename == alias for alias in aliases):
-            matches.append(value)
-    # For phase/coherence the scientific reader uses the unwrapped grid. Avoid
-    # selecting a duplicate wrapped-grid coherence layer if path context exists.
-    if layer_role == "coherence":
-        unwrapped = [v for v in matches if "unwrappedinterferogram" in v.lower()]
-        if unwrapped:
-            matches = unwrapped
+        if not any(basename == alias for alias in aliases):
+            continue
+        if layer_role == "mask":
+            if "unwrappedinterferogram" in low:
+                matches.append(value)
+            continue
+        if "unwrappedinterferogram" not in low:
+            continue
+        if f"/{pol.lower()}/" not in low:
+            continue
+        matches.append(value)
+
     matches = _normalize_variables(matches)
+    # Prefer the shared unwrapped-grid mask where present; only fall back to a
+    # polarization-specific mask if that is the only form exposed.
+    if layer_role == "mask" and matches:
+        shared = [item for item in matches if f"/{pol.lower()}/" not in item.lower()]
+        if shared:
+            matches = shared
+        else:
+            matches = [item for item in matches if f"/{pol.lower()}/" in item.lower()]
+    # The unwrapped grid can expose a single shared mask; all other requested
+    # scientific layers must resolve to the selected polarization path.
     if not matches:
         return None
-    # Same basename under the same logical path can occur as frequency/polarity
-    # variants. A unique path is safe; ambiguous full paths are reported rather
-    # than guessed. Plain names are fine where the service exposes one variable.
-    if len(matches) > 1 and all("/" in v for v in matches):
+    if len(matches) > 1:
+        # Prefer frequencyA if a newer collection exposes multiple frequencies;
+        # if ambiguity remains, fail closed rather than mixing datasets.
+        freq_a = [item for item in matches if "frequencya" in item.lower()]
+        if len(freq_a) == 1:
+            return freq_a[0]
         return None
     return matches[0]
 
@@ -187,7 +243,13 @@ def _cached_capabilities(short_name: str) -> dict[str, Any]:
     return payload
 
 
-def get_harmony_capabilities(product_type: str, production: str = "PR", maturity: str = "PROVISIONAL") -> dict[str, Any]:
+def get_harmony_capabilities(
+    product_type: str, production: str = "PR", maturity: str = "PROVISIONAL",
+    polarization: str = "HH",
+) -> dict[str, Any]:
+    pol = polarization.upper().strip()
+    if pol not in {"HH", "VV"}:
+        raise ValueError("polarization must be HH or VV")
     short_name = _collection_short_name(product_type, production, maturity)
     payload = _cached_capabilities(short_name)
     variables_node = payload.get("variables", [])
@@ -199,24 +261,43 @@ def get_harmony_capabilities(product_type: str, production: str = "PR", maturity
             if not isinstance(service, dict):
                 continue
             caps = service.get("capabilities") if isinstance(service.get("capabilities"), dict) else {}
+            subset = caps.get("subsetting") if isinstance(caps.get("subsetting"), dict) else {}
+            formats = caps.get("outputFormats") or caps.get("output_formats") or service.get("outputFormats") or []
+            normalized_formats: list[str] = []
+            if isinstance(formats, list):
+                for fmt in formats:
+                    if isinstance(fmt, str):
+                        normalized_formats.append(fmt)
+                    elif isinstance(fmt, dict):
+                        value = fmt.get("mimeType") or fmt.get("mime_type") or fmt.get("name")
+                        if isinstance(value, str):
+                            normalized_formats.append(value)
             services.append({
                 "name": service.get("name") or service.get("id") or service.get("serviceId"),
-                "url": service.get("href") or service.get("url") or service.get("referenceUrl"),
-                "variable_subset": caps.get("variableSubset", caps.get("variable_subset")),
-                "bbox_subset": caps.get("bboxSubset", caps.get("bbox_subset")),
-                "shape_subset": caps.get("shapeSubset", caps.get("shape_subset")),
-                "output_formats": caps.get("outputFormats") or caps.get("output_formats") or [],
+                "url": service.get("referenceUrl") or service.get("href") or service.get("url"),
+                "variable_subset": subset.get("variable", caps.get("variableSubset", caps.get("variable_subset"))),
+                "bbox_subset": subset.get("bbox", caps.get("bboxSubset", caps.get("bbox_subset"))),
+                "shape_subset": subset.get("shape", caps.get("shapeSubset", caps.get("shape_subset"))),
+                "temporal_subset": subset.get("temporal", caps.get("temporalSubset", caps.get("temporal_subset"))),
+                "output_formats": normalized_formats,
             })
-    layer_map = {role: _resolve_layer(variables, role) for role in LAYER_ALIASES}
+    layer_map = {role: _resolve_layer(variables, role, pol) for role in LAYER_ALIASES}
     capability_flags = _service_capabilities(payload)
     supports_tiff = any(
-        "image/tiff" in str(fmt).lower()
+        "image/tiff" in str(fmt).lower() or str(fmt).lower() in {"geotiff", "tiff"}
         for service in services
         for fmt in (service.get("output_formats") or [])
     )
-    # Some capability versions expose output formats at the top level/summary.
-    for fmt in (payload.get("outputFormats") or payload.get("summary", {}).get("outputFormats", []) if isinstance(payload.get("summary"), dict) else payload.get("outputFormats", [])):
-        supports_tiff = supports_tiff or "image/tiff" in str(fmt).lower()
+    # Harmony v3 summary and v1/v2 root-level formats both occur in practice.
+    format_nodes: list[Any] = [payload.get("outputFormats")]
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    format_nodes.extend([summary.get("outputFormats"), summary.get("output_formats")])
+    for node in format_nodes:
+        if not isinstance(node, list):
+            continue
+        for fmt in node:
+            value = fmt if isinstance(fmt, str) else (fmt.get("mimeType") or fmt.get("name") or "") if isinstance(fmt, dict) else ""
+            supports_tiff = supports_tiff or "image/tiff" in str(value).lower() or str(value).lower() in {"geotiff", "tiff"}
     layer_ready = layer_map["unwrapped_phase"] is not None and layer_map["coherence"] is not None
     return {
         "service": "NASA Harmony capability lookup",
@@ -232,16 +313,17 @@ def get_harmony_capabilities(product_type: str, production: str = "PR", maturity
         },
         "capabilities": capability_flags,
         "supports_geotiff_output": supports_tiff,
+        "polarization_selected": pol,
         "scientific_layers": layer_map,
-        "minimum_gunw_pilot_ready": bool(layer_ready and capability_flags["variable_subset"]),
+        "minimum_gunw_pilot_ready": bool(layer_ready and capability_flags["variable_subset"] and supports_tiff),
         "variables_count": len(variables),
         "variables": variables[:200],
         "variables_truncated": len(variables) > 200,
         "services": services,
         "warnings": [
             "This is a live capability lookup only; it does not start an extraction job.",
-            "AOI subsetting must not be assumed unless shape_subset or bbox_subset is explicitly true.",
-            "If a layer name is ambiguous across grids/polarizations, it is returned as unresolved instead of guessed.",
+            "AOI subsetting must not be assumed unless shape_subset or bbox_subset is explicitly true; this collection may require full-granule layer output followed by a local crop.",
+            f"Scientific layers are resolved for the explicit {pol} polarization; confirm scientific suitability before comparing pairs.",
         ],
     }
 
@@ -249,9 +331,9 @@ def get_harmony_capabilities(product_type: str, production: str = "PR", maturity
 def build_extraction_plan(
     *, granule_name: str, product_type: str, production: str,
     aoi_area_km2: float, coordinates: list[tuple[float, float]],
-    maturity: str = "PROVISIONAL",
+    maturity: str = "PROVISIONAL", polarization: str = "HH",
 ) -> dict[str, Any]:
-    capability = get_harmony_capabilities(product_type, production, maturity)
+    capability = get_harmony_capabilities(product_type, production, maturity, polarization)
     layers = capability["scientific_layers"]
     required = ["unwrapped_phase", "coherence"]
     missing = [role for role in required if not layers.get(role)]
@@ -270,9 +352,10 @@ def build_extraction_plan(
         "product_type": product_type,
         "production": production,
         "collection_maturity": maturity.upper(),
+        "polarization": polarization.upper(),
         "aoi_area_km2": round(aoi_area_km2, 3),
         "collection": capability["collection"],
-        "ready_for_extraction": not missing and capability["capabilities"]["variable_subset"],
+        "ready_for_extraction": not missing and capability["capabilities"]["variable_subset"] and capability["supports_geotiff_output"],
         "missing_required_layers": missing,
         "selected_layers": selected,
         "selected_layer_count": len(selected),
@@ -288,7 +371,7 @@ def build_extraction_plan(
         },
         "next_stage": (
             "Ready for a guarded one-granule extraction pilot. Configure EARTHDATA_TOKEN as a Backend secret only after reviewing the exact selected layers and spatial-subsetting support."
-            if not missing and capability["capabilities"]["variable_subset"]
+            if not missing and capability["capabilities"]["variable_subset"] and capability["supports_geotiff_output"]
             else "Do not extract yet. Inspect the returned capability variables/services and resolve missing or ambiguous required layer names first."
         ),
         "capability_snapshot": {
@@ -297,6 +380,7 @@ def build_extraction_plan(
             "shape_subset": capability["capabilities"]["shape_subset"],
             "supports_geotiff_output": capability["supports_geotiff_output"],
             "minimum_gunw_pilot_ready": capability["minimum_gunw_pilot_ready"],
+            "polarization": polarization.upper(),
         },
         "warnings": capability["warnings"],
     }

@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from harmony_preflight import get_harmony_capabilities, build_extraction_plan, HarmonyLookupError
+from harmony_extraction import submit_single_layer_job, get_harmony_job_status, HarmonyJobError
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,11 +37,12 @@ RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ASF_HTTP_TIMEOUT_SECONDS", "35"))
 
 app = FastAPI(
-    title="SARGuardian ASF + Harmony Preflight API",
-    version="0.2.0",
+    title="SARGuardian ASF + Harmony Pilot API",
+    version="0.3.0",
     description=(
-        "Searches ASF catalogue metadata and discovers live NASA Harmony capabilities "
-        "before any data transfer. The current API does not download or process satellite data."
+        "Searches ASF metadata, discovers NASA Harmony capabilities, and can submit an explicitly "
+        "confirmed one-granule/one-variable Harmony extraction job. SARGuardian does not download "
+        "the output raster or run scientific analysis in this stage."
     ),
 )
 
@@ -79,6 +81,23 @@ class HarmonyPlanRequest(BaseModel):
     )
     product_type: str = Field(default="GUNW", description="Pilot currently supports GUNW only.")
     maturity: str = Field(default="PROVISIONAL", description="CMR collection maturity: PROVISIONAL or BETA.")
+    polarization: str = Field(default="HH", description="GUNW polarization to resolve consistently: HH or VV.")
+
+
+class HarmonyExtractStartRequest(BaseModel):
+    granule_name: str = Field(min_length=20, max_length=300)
+    coordinates: list[tuple[float, float]] | None = Field(
+        default=None,
+        description="Optional AOI coordinates for provenance/limits. Current GUNW net2cog service does not apply this AOI on the server.",
+    )
+    product_type: str = Field(default="GUNW")
+    maturity: str = Field(default="PROVISIONAL")
+    polarization: str = Field(default="HH")
+    layer_role: str = Field(default="unwrapped_phase")
+    confirm_full_granule_layer: bool = Field(
+        default=False,
+        description="Must be true to explicitly authorize one full-granule single-layer output, because AOI subsetting is not advertised.",
+    )
 
 
 def _close_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -232,7 +251,8 @@ def health() -> dict[str, Any]:
         "data_downloaded": False,
         "scientific_analysis_performed": False,
         "harmony_capability_discovery": True,
-        "single_granule_extraction": "not-enabled-in-this-stage",
+        "single_granule_extraction": "guarded-one-layer-job-submission-available",
+        "earthdata_token_configured": bool(os.getenv("EARTHDATA_TOKEN", "").strip()),
         "original_scientific_engine_present": True,
         "max_time_window_days": MAX_DAYS,
         "max_aoi_area_km2": MAX_AOI_AREA_KM2,
@@ -327,6 +347,7 @@ def harmony_capabilities(
     product_type: str = "GUNW",
     production: str = "PR",
     maturity: str = "PROVISIONAL",
+    polarization: str = "HH",
 ) -> dict[str, Any]:
     """Inspect Harmony support for an official NISAR collection short name.
 
@@ -340,8 +361,10 @@ def harmony_capabilities(
         raise HTTPException(status_code=422, detail="production must be PR, UR, or OD.")
     if maturity.upper() not in {"PROVISIONAL", "BETA"}:
         raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
+    if polarization.upper() not in {"HH", "VV"}:
+        raise HTTPException(status_code=422, detail="polarization must be HH or VV.")
     try:
-        return get_harmony_capabilities(product_type, production, maturity.upper())
+        return get_harmony_capabilities(product_type, production, maturity.upper(), polarization.upper())
     except HarmonyLookupError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -380,7 +403,65 @@ def harmony_extraction_plan(plan: HarmonyPlanRequest) -> dict[str, Any]:
             aoi_area_km2=area_km2,
             coordinates=coords,
             maturity=plan.maturity.upper(),
+            polarization=plan.polarization.upper(),
         )
     except HarmonyLookupError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return result
+
+
+@app.post("/api/harmony/extract/start")
+def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest) -> dict[str, Any]:
+    """Start a guarded one-granule GUNW phase-only Harmony job.
+
+    This does not download a raster or run SARGuardian's scientific engine.
+    Because the current GUNW service advertises no AOI subset support, callers
+    must explicitly confirm that one full-granule layer may be produced.
+    """
+    if request.product_type != "GUNW":
+        raise HTTPException(status_code=422, detail="The first extraction pilot supports GUNW only.")
+    if request.polarization.upper() not in {"HH", "VV"}:
+        raise HTTPException(status_code=422, detail="polarization must be HH or VV.")
+    if request.maturity.upper() not in {"PROVISIONAL", "BETA"}:
+        raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
+    aoi_area_km2 = None
+    if request.coordinates is not None:
+        today_utc = datetime.now(timezone.utc).date().isoformat()
+        # Validate AOI using the same 250 km² / vertex / coordinate safety checks as catalogue search.
+        _coords, _unused_start, _unused_end, aoi_area_km2 = _validate_search(
+            CatalogSearchRequest(
+                coordinates=request.coordinates,
+                start_date=today_utc,
+                end_date=today_utc,
+                product_type="GUNW",
+            )
+        )
+    try:
+        result = submit_single_layer_job(
+            granule_name=request.granule_name.strip(),
+            maturity=request.maturity.upper(),
+            polarization=request.polarization.upper(),
+            layer_role=request.layer_role,
+            confirm_full_granule_layer=request.confirm_full_granule_layer,
+        )
+        result["aoi_coordinates_received"] = len(request.coordinates) if request.coordinates else 0
+        result["aoi_area_km2"] = round(aoi_area_km2, 3) if aoi_area_km2 is not None else None
+        result["note"] = "The AOI is recorded only for later client-side/server-side cropping; current Harmony extraction is for the full granule layer."
+        return result
+    except HarmonyLookupError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if "confirm_full_granule_layer=true" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.get("/api/harmony/jobs/{job_id}")
+def harmony_job_status(job_id: str) -> dict[str, Any]:
+    """Read Harmony job status metadata only. This route never downloads outputs."""
+    try:
+        return get_harmony_job_status(job_id)
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
