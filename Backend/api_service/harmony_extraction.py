@@ -45,6 +45,8 @@ class _SafeResultRedirect(urllib.request.HTTPRedirectHandler):
         super().__init__()
         self.followed: list[dict[str, Any]] = []
         self.rejected_reason: str | None = None
+        # Safe diagnostics only: expose the host, never the target path or signed query.
+        self.rejected_host: str | None = None
 
     @staticmethod
     def _approved(url: str) -> bool:
@@ -62,7 +64,12 @@ class _SafeResultRedirect(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
         if not self._approved(newurl):
-            self.rejected_reason = "Redirect target was outside the approved HTTPS Harmony/AWS S3 hosts; it was not contacted."
+            parsed_target = urllib.parse.urlparse(newurl)
+            self.rejected_host = (parsed_target.hostname or "unknown").lower().rstrip(".")
+            self.rejected_reason = (
+                "Redirect target host was outside the approved HTTPS Harmony/AWS S3 hosts; "
+                "it was not contacted. Only the hostname is reported for diagnosis."
+            )
             return None
         parsed = urllib.parse.urlparse(newurl)
         self.followed.append({"status": int(code), "host": (parsed.hostname or "").lower()})
@@ -329,6 +336,10 @@ def _inspect_result_headers(url: str) -> dict[str, Any]:
         "User-Agent": USER_AGENT,
         "Accept": "image/tiff, application/json;q=0.8, */*;q=0.1",
         "Accept-Encoding": "identity",
+        # The initial /service-results/ endpoint can require Earthdata auth.
+        # _SafeResultRedirect intentionally strips this header on every cross-host
+        # redirect, so the bearer token is never forwarded to S3 or another host.
+        "Authorization": f"Bearer {_token()}",
     }
     redirect_handler = _SafeResultRedirect()
     opener = urllib.request.build_opener(redirect_handler)
@@ -372,6 +383,7 @@ def _inspect_result_headers(url: str) -> dict[str, Any]:
     range_total = None if refused_redirect else _parse_content_range_total(head_headers.get("Content-Range") if head_headers is not None else None)
     probe_status: int | None = None
     probe_headers: Any = {}
+    probe_redirect_handler: _SafeResultRedirect | None = None
     # HEAD often redirects to a signed S3 URL or lacks Content-Length. Try a
     # minimal Range probe whenever safely possible and size remains unknown.
     should_probe = total is None and not refused_redirect and (head_status in {200, 206, 405, 501} or bool(redirect_handler.followed))
@@ -409,10 +421,17 @@ def _inspect_result_headers(url: str) -> dict[str, Any]:
     note = "Metadata headers only; no raster body was read or stored."
     if total is None:
         note = head_error or "The redirect was followed when approved, but the storage response did not expose an object size via Content-Length or Content-Range. No raster body was read."
+        rejected_host = redirect_handler.rejected_host or (probe_redirect_handler.rejected_host if probe_redirect_handler else None)
+        if rejected_host:
+            note = f"Redirect target host '{rejected_host}' was not contacted because it is not on the approved HTTPS Harmony/AWS S3 allowlist. The request included Earthdata authorization only to the original Harmony host; authorization is stripped on redirects. No raster body was read."
     return {
         "http_status": head_status,
         "range_probe_status": probe_status,
         "redirects_followed": redirect_handler.followed,
+        "redirect_rejected_host": (
+            redirect_handler.rejected_host
+            or (probe_redirect_handler.rejected_host if probe_redirect_handler else None)
+        ),
         "content_length_bytes": total,
         "content_length_mb": size_mb,
         "content_length_gib": size_gib,

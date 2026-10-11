@@ -1,4 +1,5 @@
 from urllib.parse import parse_qs, urlparse
+import urllib.error
 
 import pytest
 
@@ -129,3 +130,42 @@ def test_safe_result_redirect_rejects_unapproved_host_and_http():
     handler2 = harmony_extraction._SafeResultRedirect()
     assert handler2.redirect_request(req, None, 303, "See Other", {}, "http://bucket.s3.amazonaws.com/file.tif") is None
     assert handler2.rejected_reason
+
+
+def test_inspect_result_authenticates_only_initial_harmony_request(monkeypatch):
+    job_id = "ea93e3fa-cffb-422a-91d6-953d6f3498cf"
+    result_url = (
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/"
+        + job_id + "/test_reformatted.tif"
+    )
+    monkeypatch.setenv("EARTHDATA_TOKEN", "test-token-never-forward")
+    captured = {}
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            captured["url"] = req.full_url
+            captured["authorization"] = req.get_header("Authorization")
+            raise urllib.error.HTTPError(
+                req.full_url, 303, "See Other",
+                {"Location": "https://urs.earthdata.nasa.gov/oauth/authorize?secret=not-logged"},
+                None,
+            )
+
+    monkeypatch.setattr(harmony_extraction.urllib.request, "build_opener", lambda *args: FakeOpener())
+    result = harmony_extraction._inspect_result_headers(result_url)
+    assert captured["url"] == result_url
+    assert captured["authorization"] == "Bearer test-token-never-forward"
+    assert result["size_known"] is False
+    assert result["redirect_rejected_host"] is None  # Fake opener bypasses the redirect handler itself.
+
+
+def test_rejected_redirect_exposes_host_only_not_path_or_query():
+    handler = harmony_extraction._SafeResultRedirect()
+    req = harmony_extraction.urllib.request.Request(
+        "https://harmony.earthdata.nasa.gov/service-results/harmony-prod-staging/public/job/file.tif",
+        headers={"Authorization": "Bearer do-not-forward"}, method="HEAD",
+    )
+    target = "https://urs.earthdata.nasa.gov/oauth/authorize?client_secret=never-report"
+    assert handler.redirect_request(req, None, 303, "See Other", {}, target) is None
+    assert handler.rejected_host == "urs.earthdata.nasa.gov"
+    assert "never-report" not in handler.rejected_reason
