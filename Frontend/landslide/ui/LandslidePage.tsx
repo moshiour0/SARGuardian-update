@@ -422,8 +422,8 @@ function AoiWindowPanel({
   onCheckQualityLayers: () => void;
   onAnalyzeQuality: () => void;
 }) {
-  const requiredQualityRoles = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
-  const qualityRolesToCheck = [...requiredQualityRoles, ...(qualityBundle?.jobs.ionosphere_phase_screen_uncertainty ? ['ionosphere_phase_screen_uncertainty'] : [])];
+  const requiredQualityRoles = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'ionosphere_phase_screen_uncertainty', 'mask'];
+  const qualityRolesToCheck = requiredQualityRoles;
   const canAnalyzeQuality = Boolean(qualityBundle?.all_required_layers_submitted)
     && qualityRolesToCheck.every((role) => ['successful', 'completed', 'complete'].includes((qualityStatuses[role] || qualityBundle?.jobs[role]?.status) || ''));
   return (
@@ -517,6 +517,9 @@ function AoiWindowPanel({
               <div><span>Qualified fraction</span><strong>{(100 * qualityAnalysis.quality_gates.jointly_qualified_fraction_of_polygon).toFixed(1)}%</strong></div>
               <div><span>Coherence pass (≥ {qualityAnalysis.quality_gates.coherence_threshold})</span><strong>{qualityAnalysis.quality_gates.coherence_pass_pixels}</strong></div>
               <div><span>Positive component IDs</span><strong>{qualityAnalysis.quality_gates.connected_components_positive_pixels}</strong></div>
+              <div><span>Valid ionosphere screen pixels</span><strong>{qualityAnalysis.quality_gates.ionosphere_phase_screen_valid_pixels}</strong></div>
+              <div><span>Valid screen uncertainty pixels</span><strong>{qualityAnalysis.quality_gates.ionosphere_screen_uncertainty_valid_pixels ?? '—'}</strong></div>
+              <div><span>Mask dtype accepted</span><strong>{qualityAnalysis.quality_gates.mask_dtype_valid ? 'uint32 verified' : 'Unresolved'}</strong></div>
               <div><span>Base WRS land/subswath (low byte)</span><strong>{qualityAnalysis.quality_gates.mask_low_byte_land_valid_subswath_pixels ?? '—'}</strong></div>
               <div><span>Strict mask pass (flags/exceptions excluded)</span><strong>{qualityAnalysis.quality_gates.mask_valid_land_subswath_pixels}</strong></div>
               <div><span>Ionosphere-filter flagged</span><strong>{qualityAnalysis.quality_gates.mask_ionosphere_filter_flagged_pixels ?? '—'}</strong></div>
@@ -529,6 +532,16 @@ function AoiWindowPanel({
                 <div><span>Pixels after all gates</span><strong>{qualityAnalysis.ionosphere_corrected_phase_statistics.count}</strong></div>
               </div>
             )}
+            {qualityAnalysis.mask_semantics && (
+              <div className="gate-funnel mask-intersection-panel">
+                <strong>Mask format &amp; scientific safety</strong>
+                <small>Expected dtype: {qualityAnalysis.mask_semantics.expected_dtype} · Observed dtype: {qualityAnalysis.mask_semantics.observed_dtype}</small>
+                <small>Decode status: {qualityAnalysis.mask_semantics.decode_status}</small>
+                <small>Upstream source encoding independently verified: {qualityAnalysis.mask_semantics.source_product_upstream_encoding_verified ? 'yes' : 'no'}</small>
+                <small>Values ≥ 2²⁴ quarantined: {qualityAnalysis.mask_semantics.packed_values_ge_2pow24_quarantined}</small>
+                <p className="catalog-warning">{qualityAnalysis.mask_semantics.note}</p>
+              </div>
+            )}
             <p className="catalog-warning">{qualityAnalysis.physical_displacement?.reason || 'This is a quality-gated phase diagnostic, not LOS displacement or landslide detection.'}</p>
             {qualityAnalysis.warnings?.map((warning) => (
               <p className="catalog-warning" role="status" key={warning}>{warning}</p>
@@ -539,7 +552,8 @@ function AoiWindowPanel({
                 <div className="catalog-stats">
                   <div><span>Phase + coherence</span><strong>{qualityAnalysis.quality_gates.phase_and_coherence_pixels ?? '—'}</strong></div>
                   <div><span>After components</span><strong>{qualityAnalysis.quality_gates.after_connected_components_pixels ?? '—'}</strong></div>
-                  <div><span>After ionosphere validity</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_validity_pixels ?? '—'}</strong></div>
+                  <div><span>After ionosphere screen</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_screen_pixels ?? '—'}</strong></div>
+                  <div><span>After screen uncertainty</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_uncertainty_validity_pixels ?? '—'}</strong></div>
                   <div><span>After strict mask gate</span><strong>{qualityAnalysis.quality_gates.after_land_and_subswath_mask_pixels ?? '—'}</strong></div>
                   <div><span>After ionosphere filter mask</span><strong>{qualityAnalysis.quality_gates.after_ionosphere_filter_mask_pixels ?? '—'}</strong></div>
                 </div>

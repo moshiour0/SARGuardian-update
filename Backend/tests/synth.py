@@ -166,7 +166,7 @@ def write_gunw(
         phase[nodata] = 0.0
 
     coh = np.full((n, n), coherence, dtype=np.float32)
-    mask = np.full((n, n), encode_mask(), dtype=np.uint8)
+    mask = np.full((n, n), encode_mask(), dtype=np.uint32)
     if hole_fraction:
         # Scattered invalid pixels, the way real decorrelation arrives. Stripes
         # leave whole clean blocks standing, so they never exercise the relaxed
@@ -192,6 +192,10 @@ def write_gunw(
         g.create_dataset("coherenceMagnitude", data=coh)
         g.create_dataset("connectedComponents", data=comp)
         g.create_dataset("ionospherePhaseScreen", data=iono_phase)
+        # Real GUNW products provide screen uncertainty separately. A finite,
+        # nonzero synthetic uncertainty exercises the correction-validity gate
+        # without inventing a numerical uncertainty threshold.
+        g.create_dataset("ionospherePhaseScreenUncertainty", data=np.full((n, n), 0.01, dtype=np.float32))
         g.create_dataset("xCoordinates", data=xs)
         g.create_dataset("yCoordinates", data=ys)
         g.create_dataset("projection", data=np.uint32(4326))

@@ -867,7 +867,10 @@ def start_gunw_quality_layer_jobs(
         "jobs": jobs,
         "submission_errors": errors,
         "all_required_layers_submitted": all(
-            role in jobs for role in ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
+            role in jobs for role in (
+                "unwrapped_phase", "coherence", "connected_components",
+                "ionosphere_phase_screen", "ionosphere_phase_screen_uncertainty", "mask",
+            )
         ),
         "aoi_subset_requested": False,
         "result_rasters_downloaded_by_sarguardian": False,
@@ -919,7 +922,10 @@ def _read_remote_cog_aoi_array(
                 if width <= 0 or height <= 0 or width * height > max_window_pixels:
                     raise HarmonyJobError("AOI raster window is empty or exceeds the safe pixel limit.")
                 data = dataset.read(1, window=window, masked=True)
-                values = np.asarray(data.data, dtype=np.float64)
+                values = np.asarray(data.data)
+                # Preserve native data type. In particular, GUNW mask is a packed
+                # uint32 categorical word; coercing it to float can conceal upstream
+                # precision loss and makes later integer decoding unsafe.
                 valid_data = ~np.ma.getmaskarray(data) & np.isfinite(values)
                 inside = geometry_mask(
                     [native_polygon],
@@ -1539,13 +1545,16 @@ def analyze_gunw_aoi_layers(
     import numpy as np
     if not 0.0 <= coherence_threshold <= 1.0:
         raise HarmonyJobError("coherence_threshold must be between 0 and 1.")
-    required_roles = ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
+    required_roles = (
+        "unwrapped_phase", "coherence", "connected_components",
+        "ionosphere_phase_screen", "ionosphere_phase_screen_uncertainty", "mask",
+    )
     missing = [role for role in required_roles if not job_ids.get(role)]
     if missing:
         raise HarmonyJobError("Missing completed Harmony job IDs for required layers: " + ", ".join(missing))
 
     layers: dict[str, dict[str, Any]] = {}
-    for role in (*required_roles, "ionosphere_phase_screen_uncertainty"):
+    for role in required_roles:
         job_id = job_ids.get(role)
         if not job_id:
             continue
@@ -1581,23 +1590,39 @@ def analyze_gunw_aoi_layers(
     coherence = coh_layer["values"]
     components = comp_layer["values"]
     iono = iono_layer["values"]
+    iono_uncertainty_layer = layers["ionosphere_phase_screen_uncertainty"]
+    iono_uncertainty = iono_uncertainty_layer["values"]
     mask_values = mask_layer["values"]
 
     # Match the core reader's gates: raw zero is treated as no phase; coherence
-    # must meet threshold; connected component IDs must be positive; and the
-    # GUNW mask is decoded as water/subswath bits, not treated as a boolean mask.
+    # must meet threshold; connected component IDs must be positive. The GUNW
+    # screen and its uncertainty are both required before corrected-phase pixels
+    # can qualify. No arbitrary uncertainty magnitude threshold is invented.
     phase_valid = inside & phase_layer["valid_data"] & np.isfinite(phase) & (phase != 0)
     coherence_valid = inside & coh_layer["valid_data"] & np.isfinite(coherence)
     coherence_pass = coherence_valid & (coherence >= coherence_threshold)
     components_valid = inside & comp_layer["valid_data"] & np.isfinite(components)
     components_pass = components_valid & (components > 0)
     iono_valid = inside & iono_layer["valid_data"] & np.isfinite(iono)
+    iono_uncertainty_valid = (
+        inside & iono_uncertainty_layer["valid_data"] & np.isfinite(iono_uncertainty)
+    )
+
+    # The packed product mask schema is uint32. If Harmony returns a floating-
+    # point or other converted mask, do not round/cast it and pretend the bits
+    # have been recovered. Fail closed while exposing the dtype in diagnostics.
+    mask_source_dtype = str(mask_layer.get("dtype") or np.asarray(mask_values).dtype).lower()
+    mask_array_dtype = np.asarray(mask_values).dtype
+    mask_dtype_valid = mask_source_dtype == "uint32" and mask_array_dtype == np.dtype("uint32")
     mask_valid = inside & mask_layer["valid_data"] & np.isfinite(mask_values)
-    # GUNW mask fields are packed in a uint32. WRS is only the low byte;
-    # bit 24 is an ionosphere filtering/interpolation flag, not a water digit.
+    if not mask_dtype_valid:
+        mask_valid = np.zeros(mask_values.shape, dtype=bool)
+
+    # Decode the uint32 product mask without an intermediate float conversion.
+    # WRS is the low byte; higher bytes carry input exceptions and flag fields.
     mask_uint32 = np.zeros(mask_values.shape, dtype=np.uint32)
-    if np.any(mask_valid):
-        mask_uint32[mask_valid] = np.rint(mask_values[mask_valid]).astype(np.uint32)
+    if mask_dtype_valid and np.any(mask_valid):
+        mask_uint32[mask_valid] = mask_values[mask_valid]
     wrs_code = mask_uint32 & np.uint32(0xFF)
     secondary_input_exception = (mask_uint32 >> np.uint32(8)) & np.uint32(0xFF)
     reference_input_exception = (mask_uint32 >> np.uint32(16)) & np.uint32(0xFF)
@@ -1628,8 +1653,8 @@ def analyze_gunw_aoi_layers(
     ionosphere_filter_unflagged = mask_valid & ~ionosphere_filter_flag
 
     jointly_valid = (
-        phase_valid & coherence_pass & components_pass & iono_valid & mask_pass
-        & ionosphere_filter_unflagged
+        phase_valid & coherence_pass & components_pass & iono_valid
+        & iono_uncertainty_valid & mask_pass & ionosphere_filter_unflagged
     )
 
     comp_sample = components[phase_valid & coherence_pass & components_pass]
@@ -1649,19 +1674,19 @@ def analyze_gunw_aoi_layers(
         ("coherence", "coherence", coherence_valid),
         ("connected_components", "connected_components_values", components_valid),
         ("ionosphere_phase_screen", "ionosphere_phase_screen", iono_valid),
+        ("ionosphere_phase_screen_uncertainty", "ionosphere_phase_screen_uncertainty", iono_uncertainty_valid),
         ("mask", "mask_values", mask_valid),
     ):
         layer_stats[role] = _array_stats(layers[role]["values"], valid_mask)
-    if "ionosphere_phase_screen_uncertainty" in layers:
-        unc = layers["ionosphere_phase_screen_uncertainty"]
-        layer_stats["ionosphere_phase_screen_uncertainty"] = _array_stats(
-            unc["values"], unc["inside"] & unc["valid_data"] & np.isfinite(unc["values"])
-        )
 
     # Gate-by-gate counts reveal exactly where candidate pixels are rejected.
     phase_and_coherence = phase_valid & coherence_pass
     after_components = phase_and_coherence & components_pass
-    after_iono = after_components & iono_valid
+    after_iono_screen = after_components & iono_valid
+    after_iono_uncertainty = after_iono_screen & iono_uncertainty_valid
+    # Existing candidate-to-mask diagnostic now means candidate pixels with
+    # both a valid screen and valid uncertainty, matching correction eligibility.
+    after_iono = after_iono_uncertainty
     after_mask = after_iono & mask_pass
     after_iono_filter_mask = after_mask & ionosphere_filter_unflagged
 
@@ -1698,7 +1723,7 @@ def analyze_gunw_aoi_layers(
         & (secondary_input_exception == 0)
     )
     mask_intersection_diagnostics = {
-        "candidate_population": "pixels remaining after phase + coherence + positive components + valid ionosphere phase screen",
+        "candidate_population": "pixels remaining after phase + coherence + positive components + valid ionosphere phase screen + finite screen uncertainty",
         "candidate_pixels_after_ionosphere_validity": int(after_iono.sum()),
         "candidate_mask_valid_pixels": int(candidate_mask_valid.sum()),
         "candidate_mask_invalid_or_nodata_pixels": int((after_iono & ~mask_valid).sum()),
@@ -1718,13 +1743,28 @@ def analyze_gunw_aoi_layers(
 
     # This remains a phase-domain diagnostic only. It is intentionally null
     # when no pixel survives every quality gate; it is not LOS displacement.
-    corrected_phase = phase - np.nan_to_num(iono, nan=0.0)
+    correction_input_valid = phase_valid & iono_valid & iono_uncertainty_valid
+    corrected_phase = np.full(np.asarray(phase).shape, np.nan, dtype=np.float64)
+    corrected_phase[correction_input_valid] = (
+        phase[correction_input_valid] - iono[correction_input_valid]
+    )
     corrected_phase_stats = _array_stats(corrected_phase, jointly_valid) if np.any(jointly_valid) else None
     layer_diagnostics = {
         role: _layer_value_diagnostics(layer, role=role)
         for role, layer in layers.items()
     }
     warnings: list[str] = []
+    if not mask_dtype_valid:
+        warnings.append(
+            f"Packed GUNW mask dtype is {mask_source_dtype!r}, not native uint32. "
+            "Mask bit decoding is unresolved; no mask pixels were allowed through the strict gate. "
+            "Do not round or cast the mask to recover flags. Verify the Harmony output dtype and source product."
+        )
+    if int(iono_uncertainty_valid.sum()) == 0:
+        warnings.append(
+            "No finite ionosphere phase-screen uncertainty pixels are available in this AOI. "
+            "Corrected-phase qualification is blocked rather than substituting zero uncertainty."
+        )
     if int(components_pass.sum()) == 0:
         comp_diag = layer_diagnostics["connected_components"]
         if comp_diag["valid_data_pixels_in_polygon"] == 0:
@@ -1773,6 +1813,15 @@ def analyze_gunw_aoi_layers(
         "aoi_cropped_in_memory": True,
         "full_raster_downloaded_by_sarguardian": False,
         "persistent_storage_used": False,
+        "mask_semantics": {
+            "expected_dtype": "uint32",
+            "observed_dtype": mask_source_dtype,
+            "dtype_valid": bool(mask_dtype_valid),
+            "decode_status": "packed_uint32_decoded_with_high_flag_quarantine" if mask_dtype_valid else "unresolved_non_uint32_mask_dtype",
+            "source_product_upstream_encoding_verified": False,
+            "packed_values_ge_2pow24_quarantined": int(packed_wrs_ambiguous.sum()),
+            "note": "Exact native-HDF5/COG agreement verifies transfer fidelity, not upstream mask encoding. Values >= 2^24 remain quarantined until independent validity evidence or a corrected source product resolves the ISCE3 float32-geocoding ambiguity.",
+        },
         "aoi": {
             "window_width_px": int(reference["window_width"]),
             "window_height_px": int(reference["window_height"]),
@@ -1793,7 +1842,11 @@ def analyze_gunw_aoi_layers(
             "connected_components_positive_pixels": int(components_pass.sum()),
             "after_connected_components_pixels": int(after_components.sum()),
             "ionosphere_phase_screen_valid_pixels": int(iono_valid.sum()),
+            "ionosphere_screen_uncertainty_valid_pixels": int(iono_uncertainty_valid.sum()),
+            "after_ionosphere_screen_pixels": int(after_iono_screen.sum()),
+            "after_ionosphere_uncertainty_validity_pixels": int(after_iono_uncertainty.sum()),
             "after_ionosphere_validity_pixels": int(after_iono.sum()),
+            "mask_dtype_valid": bool(mask_dtype_valid),
             "mask_low_byte_land_valid_subswath_pixels": int(base_wrs_pass.sum()),
             "mask_reference_exception_pixels": int((mask_valid & (reference_input_exception != 0)).sum()),
             "mask_secondary_exception_pixels": int((mask_valid & (secondary_input_exception != 0)).sum()),
@@ -1824,7 +1877,7 @@ def analyze_gunw_aoi_layers(
                 f"coherence magnitude >= {coherence_threshold}",
                 "connected component ID > 0",
                 "GUNW mask decoded for water and reference/secondary subswath validity",
-                "ionosphere phase screen subtracted where valid",
+                "ionosphere phase screen and finite uncertainty required for corrected-phase qualification",
             ],
             "note": "This is an array adapter aligned with the original reader's quality gates, not a call to its HDF5-only read_gunw function. No reference was selected and no LOS displacement was computed.",
         },

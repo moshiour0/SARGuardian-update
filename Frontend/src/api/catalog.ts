@@ -147,6 +147,15 @@ export type HarmonyJobStatusResponse = {
 
 export type GunwQualityAnalysisResponse = {
   service: string;
+  mask_semantics?: {
+    expected_dtype: string;
+    observed_dtype: string;
+    dtype_valid: boolean;
+    decode_status: string;
+    source_product_upstream_encoding_verified: boolean;
+    packed_values_ge_2pow24_quarantined: number;
+    note: string;
+  };
   mode: string;
   granule_name: string;
   polarization: string;
@@ -206,7 +215,11 @@ export type GunwQualityAnalysisResponse = {
     connected_components_positive_pixels: number;
     after_connected_components_pixels?: number;
     ionosphere_phase_screen_valid_pixels: number;
+    ionosphere_screen_uncertainty_valid_pixels?: number;
+    after_ionosphere_screen_pixels?: number;
+    after_ionosphere_uncertainty_validity_pixels?: number;
     after_ionosphere_validity_pixels?: number;
+    mask_dtype_valid?: boolean;
     mask_valid_land_subswath_pixels: number;
     after_land_and_subswath_mask_pixels?: number;
     mask_low_byte_land_valid_subswath_pixels?: number;

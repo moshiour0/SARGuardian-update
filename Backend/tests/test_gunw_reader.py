@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 import synth
-from gunw_reader import check_consistency, decode_gunw_mask, read_gunw, verify_products
+from gunw_reader import check_consistency, read_gunw, verify_products
 
 TOL_MM = 1.5
 
@@ -94,26 +94,10 @@ def test_coherence_comes_from_the_unwrapped_grid(tmp_path):
         "picked up the decoy's 0.99, so it read the wrapped grid"
 
 
-def test_gunw_mask_decoder_uses_low_byte_and_excludes_flagged_or_ambiguous_pixels():
-    # 11 = dry land, ref/sec subswath 1/1; 111 = water; 12 is a valid low-byte
-    # WRS code; values >= 2**24 carry bit 24 and may have a corrupted low byte
-    # due to the documented float32 geocoding issue.
-    mask = np.array([[11, 111, 12, 16777227, 16777228, 11 | (1 << 8), 11 | (1 << 16)]], dtype=np.uint32)
-    decoded = decode_gunw_mask(mask)
-    assert decoded["wrs_code"].tolist() == [[11, 111, 12, 11, 12, 11, 11]]
-    assert decoded["usable"].tolist() == [[True, False, True, False, False, False, False]]
-    assert decoded["summary"]["base_wrs_land_valid_subswath_pixels"] == 6
-    assert decoded["summary"]["reference_input_exception_nonzero_pixels"] == 1
-    assert decoded["summary"]["secondary_input_exception_nonzero_pixels"] == 1
-    assert decoded["summary"]["ionosphere_filter_flag_pixels"] == 2
-    assert decoded["summary"]["packed_wrs_decode_ambiguous_pixels"] == 2
-    assert decoded["summary"]["strict_usable_pixels"] == 2
-
-
 def test_mask_polarity_rejects_water_and_missing_subswaths(tmp_path):
     """
-    The three-digit code again: `mask == 0` keeps exactly the pixels invalid in
-    both acquisitions. Both stripes must be gone and the rest must survive.
+    The low-byte WRS code excludes water and zero reference/secondary subswaths.
+    Both invalid stripes must be gone and the rest must survive.
     """
     f = tmp_path / synth.granule_name()
     t = synth.write_gunw(f, truth_mm=50.0, water_stripe=True, unusable_stripe=True)
@@ -321,3 +305,41 @@ def test_a_name_that_is_not_a_granule_yields_no_track():
     from gunw_reader import track_of
     assert track_of("GOFF_20251128_20251210_PR_HH-layer2.tif") == ""
     assert track_of("") == ""
+
+
+def test_uint32_packed_mask_flags_are_preserved_and_quarantined(tmp_path):
+    """Packed uint32 masks above 2**24 must not be decimal-decoded or repaired by guesswork."""
+    import h5py
+
+    f = tmp_path / synth.granule_name()
+    synth.write_gunw(f, truth_mm=50.0)
+    mask_path = f"{synth.UNW}/mask"
+    with h5py.File(f, "r+") as h5:
+        shape = h5[f"{synth.UNW}/HH/unwrappedPhase"].shape
+        del h5[mask_path]
+        mask = np.full(shape, 21, dtype=np.uint32)
+        # Exact word with bit 24 set and low WRS byte 21. This can be affected
+        # by upstream float32 geocoding; the reader must quarantine it, not repair.
+        mask[:12, :] = np.uint32(16777237)
+        h5[synth.UNW].create_dataset("mask", data=mask)
+    result = read_gunw(f, auto_ref=True)
+    assert result["mask_diagnostics"]["bit_packed_uint32_semantics_applied"] is True
+    assert result["mask_diagnostics"]["packed_values_ge_2pow24_quarantined_pixels"] == 12 * shape[1]
+    assert result["mask_diagnostics"]["strict_mask_pass_pixels"] == (shape[0] - 12) * shape[1]
+    assert not result["valid"][:12, :].any()
+
+
+def test_missing_ionosphere_uncertainty_blocks_requested_correction(tmp_path):
+    """Never silently treat absent uncertainty as a valid zero-uncertainty correction."""
+    import h5py
+
+    f = tmp_path / synth.granule_name()
+    synth.write_gunw(f, truth_mm=50.0, iono_mm=20.0)
+    uncertainty_path = f"{synth.UNW}/HH/ionospherePhaseScreenUncertainty"
+    with h5py.File(f, "r+") as h5:
+        del h5[uncertainty_path]
+    result = read_gunw(f, auto_ref=True, apply_iono=True)
+    assert result["ionosphere_correction_status"] == "blocked_missing_or_misaligned_uncertainty"
+    assert result["ionosphere_correction_applied"] is False
+    assert result["ionosphere_correction_valid_pixels"] == 0
+    assert not result["valid"].any()

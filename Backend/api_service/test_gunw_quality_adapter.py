@@ -29,7 +29,8 @@ def _synthetic_layer(role, values, inside, valid_data, grid=None):
         }
     return {
         "role": role,
-        "values": np.asarray(values),
+        "values": np.asarray(values, dtype=np.uint32) if role == "mask" else np.asarray(values),
+        "dtype": "uint32" if role == "mask" else str(np.asarray(values).dtype),
         "inside": np.asarray(inside, dtype=bool),
         "valid_data": np.asarray(valid_data, dtype=bool),
         "grid": dict(grid),
@@ -111,6 +112,7 @@ def test_quality_analysis_refuses_misaligned_layers(monkeypatch):
         "coherence": _synthetic_layer("coherence", np.ones((2, 2)), inside, valid),
         "connected_components": _synthetic_layer("connected_components", np.ones((2, 2)), inside, valid),
         "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.zeros((2, 2)), inside, valid),
+        "ionosphere_phase_screen_uncertainty": _synthetic_layer("ionosphere_phase_screen_uncertainty", np.full((2, 2), 0.05), inside, valid),
         "mask": _synthetic_layer("mask", np.full((2, 2), 11), inside, valid),
     }
     bad_grid = dict(base["coherence"]["grid"])
@@ -131,6 +133,7 @@ def test_quality_analysis_refuses_misaligned_layers(monkeypatch):
                 "coherence": "coh",
                 "connected_components": "comp",
                 "ionosphere_phase_screen": "iono",
+                "ionosphere_phase_screen_uncertainty": "unc",
                 "mask": "mask",
             },
         )
@@ -171,6 +174,7 @@ def test_all_zero_component_layer_is_reported_as_quality_gate_problem(monkeypatc
         "coherence": _synthetic_layer("coherence", np.full((2, 2), 0.8), inside, valid),
         "connected_components": _synthetic_layer("connected_components", np.zeros((2, 2), dtype=np.uint32), inside, valid),
         "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.zeros((2, 2)), inside, valid),
+        "ionosphere_phase_screen_uncertainty": _synthetic_layer("ionosphere_phase_screen_uncertainty", np.full((2, 2), 0.05), inside, valid),
         "mask": _synthetic_layer("mask", np.full((2, 2), 11), inside, valid),
     }
     layer_map["connected_components"]["dtype"] = "uint32"
@@ -183,7 +187,7 @@ def test_all_zero_component_layer_is_reported_as_quality_gate_problem(monkeypatc
         granule_name=GRANULE,
         polarization="HH",
         coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
-        job_ids={"unwrapped_phase": "phase", "coherence": "coh", "connected_components": "comp", "ionosphere_phase_screen": "iono", "mask": "mask"},
+        job_ids={"unwrapped_phase": "phase", "coherence": "coh", "connected_components": "comp", "ionosphere_phase_screen": "iono", "ionosphere_phase_screen_uncertainty": "unc", "mask": "mask"},
     )
     assert result["quality_gates"]["phase_and_coherence_pixels"] == 4
     assert result["quality_gates"]["connected_components_positive_pixels"] == 0
@@ -206,6 +210,7 @@ def test_mask_intersection_diagnostic_identifies_flagged_candidates(monkeypatch)
         "coherence": _synthetic_layer("coherence", np.full((2, 2), 0.9), inside, valid),
         "connected_components": _synthetic_layer("connected_components", np.ones((2, 2), dtype=np.uint16), inside, valid),
         "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.full((2, 2), 0.1), inside, valid),
+        "ionosphere_phase_screen_uncertainty": _synthetic_layer("ionosphere_phase_screen_uncertainty", np.full((2, 2), 0.05), inside, valid),
         "mask": _synthetic_layer("mask", mask, inside, valid),
     }
     layer_map["mask"]["dtype"] = "uint32"
@@ -218,7 +223,7 @@ def test_mask_intersection_diagnostic_identifies_flagged_candidates(monkeypatch)
         granule_name=GRANULE,
         polarization="HH",
         coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
-        job_ids={"unwrapped_phase": "phase", "coherence": "coh", "connected_components": "comp", "ionosphere_phase_screen": "iono", "mask": "mask"},
+        job_ids={"unwrapped_phase": "phase", "coherence": "coh", "connected_components": "comp", "ionosphere_phase_screen": "iono", "ionosphere_phase_screen_uncertainty": "unc", "mask": "mask"},
     )
     diagnostic = result["mask_intersection_diagnostics"]
     assert diagnostic["candidate_pixels_after_ionosphere_validity"] == 4
@@ -231,3 +236,79 @@ def test_mask_intersection_diagnostic_identifies_flagged_candidates(monkeypatch)
     assert diagnostic["candidate_passes_all_mask_rules_pixels"] == 2
     assert result["quality_gates"]["jointly_qualified_pixels"] == 2
     assert result["physical_displacement"]["computed"] is False
+
+
+def test_packed_mask_requires_native_uint32_and_does_not_round_float_mask(monkeypatch):
+    inside = np.ones((2, 2), dtype=bool)
+    valid = np.ones((2, 2), dtype=bool)
+    layers = {
+        "unwrapped_phase": _synthetic_layer("unwrapped_phase", np.ones((2, 2)), inside, valid),
+        "coherence": _synthetic_layer("coherence", np.full((2, 2), 0.9), inside, valid),
+        "connected_components": _synthetic_layer("connected_components", np.ones((2, 2), dtype=np.uint32), inside, valid),
+        "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.zeros((2, 2)), inside, valid),
+        "ionosphere_phase_screen_uncertainty": _synthetic_layer("ionosphere_phase_screen_uncertainty", np.full((2, 2), 0.01), inside, valid),
+        "mask": _synthetic_layer("mask", np.full((2, 2), 11, dtype=np.float32), inside, valid),
+    }
+    layers["mask"]["values"] = np.full((2, 2), 11, dtype=np.float32)
+    layers["mask"]["dtype"] = "float32"
+    monkeypatch.setattr(he, "_read_job_aoi_layer", lambda *, job_id, granule_name, polarization, role, coordinates: layers[role])
+    result = he.analyze_gunw_aoi_layers(
+        granule_name=GRANULE, polarization="HH",
+        coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
+        job_ids={role: f"job-{role}" for role in layers},
+    )
+    assert result["mask_semantics"]["dtype_valid"] is False
+    assert result["mask_semantics"]["decode_status"] == "unresolved_non_uint32_mask_dtype"
+    assert result["quality_gates"]["jointly_qualified_pixels"] == 0
+    assert any("not native uint32" in item for item in result["warnings"])
+
+
+def test_ionosphere_uncertainty_nodata_excludes_corrected_phase_pixel(monkeypatch):
+    inside = np.ones((2, 2), dtype=bool)
+    valid = np.ones((2, 2), dtype=bool)
+    uncertainty = np.array([[0.01, np.nan], [0.02, 0.03]], dtype=np.float32)
+    layers = {
+        "unwrapped_phase": _synthetic_layer("unwrapped_phase", np.full((2, 2), 2.0), inside, valid),
+        "coherence": _synthetic_layer("coherence", np.full((2, 2), 0.9), inside, valid),
+        "connected_components": _synthetic_layer("connected_components", np.ones((2, 2), dtype=np.uint32), inside, valid),
+        "ionosphere_phase_screen": _synthetic_layer("ionosphere_phase_screen", np.full((2, 2), 0.1), inside, valid),
+        "ionosphere_phase_screen_uncertainty": _synthetic_layer("ionosphere_phase_screen_uncertainty", uncertainty, inside, np.isfinite(uncertainty)),
+        "mask": _synthetic_layer("mask", np.full((2, 2), 11), inside, valid),
+    }
+    monkeypatch.setattr(he, "_read_job_aoi_layer", lambda *, job_id, granule_name, polarization, role, coordinates: layers[role])
+    result = he.analyze_gunw_aoi_layers(
+        granule_name=GRANULE, polarization="HH",
+        coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
+        job_ids={role: f"job-{role}" for role in layers},
+    )
+    assert result["quality_gates"]["ionosphere_screen_uncertainty_valid_pixels"] == 3
+    assert result["quality_gates"]["after_ionosphere_uncertainty_validity_pixels"] == 3
+    assert result["quality_gates"]["jointly_qualified_pixels"] == 3
+    assert result["ionosphere_corrected_phase_statistics"]["count"] == 3
+
+
+def test_mask_low_byte_and_high_flags_are_decoded_independently():
+    # In uint32, bit 24 is independent of the low WRS byte. Float32 rounding
+    # around 2**24 can change a neighboring word; do not manufacture a repaired value.
+    original = np.uint32(16777237)  # 0x01000015: bit 24 set, WRS byte 21
+    rounded = np.float32(original).item()
+    assert int(original & np.uint32(0xFF)) == 21
+    assert int(np.uint32(16777236) & np.uint32(0xFF)) == 20
+    assert int(original & np.uint32(1 << 24)) != 0
+    assert int(np.uint32(rounded)) == 16777236
+
+
+def test_quality_analysis_requires_iono_uncertainty_job_before_reading():
+    with pytest.raises(he.HarmonyJobError, match="ionosphere_phase_screen_uncertainty"):
+        he.analyze_gunw_aoi_layers(
+            granule_name=GRANULE,
+            polarization="HH",
+            coordinates=[(82.5, 27.4), (82.6, 27.4), (82.6, 27.5)],
+            job_ids={
+                "unwrapped_phase": "phase",
+                "coherence": "coh",
+                "connected_components": "comp",
+                "ionosphere_phase_screen": "iono",
+                "mask": "mask",
+            },
+        )

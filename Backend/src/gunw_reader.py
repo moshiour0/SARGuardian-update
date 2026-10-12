@@ -316,70 +316,6 @@ def build_aoi_mask(xs: np.ndarray, ys: np.ndarray, ring, epsg: int | None) -> np
     return mask
 
 
-def decode_gunw_mask(mask: np.ndarray) -> dict:
-    """Decode the NISAR GUNW uint32 mask conservatively and compactly.
-
-    The low byte is the decimal-coded WRS field (water/ref-subswath/sec-subswath).
-    Bits 8..15 and 16..23 carry secondary/reference input-exception masks; bit 24
-    marks pixels masked/interpolated during ionosphere filtering. Some geocoded
-    products exhibit the documented float32 precision issue around 2**24, where
-    16777227 can be rounded to 16777228 and alter the low-byte WRS code. Such
-    high-bit values are conservatively excluded from strict use unless verified
-    against the source product or a trusted validDataMask. This avoids guessing.
-
-    The helper returns only a compact set of low-byte/boolean arrays rather than
-    allocating one uint32 array for every field; full GUNW frames can be large.
-    """
-    raw = np.asarray(mask)
-    if raw.dtype.kind == "u" and raw.dtype.itemsize <= 4:
-        raw_u32 = raw.astype(np.uint32, copy=False)
-        numeric_valid = None  # every unsigned integer value fits uint32 here
-    else:
-        finite = np.isfinite(raw) if np.issubdtype(raw.dtype, np.number) else np.zeros(raw.shape, dtype=bool)
-        numeric_valid = finite & (raw >= 0) & (raw <= np.iinfo(np.uint32).max)
-        raw_u32 = np.zeros(raw.shape, dtype=np.uint32)
-        if np.any(numeric_valid):
-            raw_u32[numeric_valid] = np.rint(raw[numeric_valid]).astype(np.uint32)
-
-    wrs_code = (raw_u32 & np.uint32(0xFF)).astype(np.uint8, copy=False)
-    water_flag = wrs_code // np.uint8(100)
-    reference_subswath = (wrs_code // np.uint8(10)) % np.uint8(10)
-    secondary_subswath = wrs_code % np.uint8(10)
-    base_wrs_valid = (
-        (wrs_code != np.uint8(255))
-        & (water_flag == 0)
-        & (reference_subswath > 0)
-        & (secondary_subswath > 0)
-    )
-    if numeric_valid is not None:
-        base_wrs_valid &= numeric_valid
-
-    # Decode the two exception-byte groups using combined masks, keeping the
-    # number of full-frame temporary arrays down for the original HDF5 reader.
-    reference_exception_pixels = (raw_u32 & np.uint32(0x00FF0000)) != 0
-    secondary_exception_pixels = (raw_u32 & np.uint32(0x0000FF00)) != 0
-    ionosphere_filter_flag = (raw_u32 & np.uint32(1 << 24)) != 0
-    packed_wrs_ambiguous = raw_u32 >= np.uint32(1 << 24)
-    exceptions_clear = (raw_u32 & np.uint32(0x00FFFF00)) == 0
-    usable = base_wrs_valid & exceptions_clear & ~ionosphere_filter_flag & ~packed_wrs_ambiguous
-
-    return {
-        "wrs_code": wrs_code,
-        "usable": usable,
-        "summary": {
-            "encoding": "uint32 bit-packed; low byte=WRS decimal code; bits 8-15=secondary input exception; bits 16-23=reference input exception; bit 24=ionosphere filter/interpolation flag",
-            "polygon_pixels": int(raw.size),
-            "numeric_in_range_pixels": int(numeric_valid.sum()) if numeric_valid is not None else int(raw.size),
-            "base_wrs_land_valid_subswath_pixels": int(base_wrs_valid.sum()),
-            "reference_input_exception_nonzero_pixels": int(reference_exception_pixels.sum()),
-            "secondary_input_exception_nonzero_pixels": int(secondary_exception_pixels.sum()),
-            "ionosphere_filter_flag_pixels": int(ionosphere_filter_flag.sum()),
-            "packed_wrs_decode_ambiguous_pixels": int(packed_wrs_ambiguous.sum()),
-            "strict_usable_pixels": int(usable.sum()),
-        },
-    }
-
-
 # ---------------------------------------------------------------------------
 # Core read
 # ---------------------------------------------------------------------------
@@ -429,6 +365,7 @@ def read_gunw(
         p_conn = sibling("connectedComponents")
         p_mask = sibling("mask", "layoverShadowMask")
         p_iono = sibling("ionospherePhaseScreen")
+        p_iono_unc = sibling("ionospherePhaseScreenUncertainty")
         p_x = sibling("xCoordinates", ndim=1)
         p_y = sibling("yCoordinates", ndim=1)
 
@@ -437,12 +374,14 @@ def read_gunw(
         logger.info("coherence  : %s", p_coh.rsplit("/", 1)[-1] if p_coh else "NOT FOUND")
         logger.info("components : %s", p_conn.rsplit("/", 1)[-1] if p_conn else "not found")
         logger.info("ionosphere : %s", p_iono.rsplit("/", 1)[-1] if p_iono else "not found")
+        logger.info("iono uncertainty: %s", p_iono_unc.rsplit("/", 1)[-1] if p_iono_unc else "not found")
 
         phase = np.asarray(f[p_phase][()], dtype=np.float64)
         coherence = np.asarray(f[p_coh][()], dtype=np.float64) if p_coh else None
         components = np.asarray(f[p_conn][()]) if p_conn else None
         losmask = np.asarray(f[p_mask][()]) if p_mask else None
         iono = np.asarray(f[p_iono][()], dtype=np.float64) if p_iono else None
+        iono_uncertainty = np.asarray(f[p_iono_unc][()], dtype=np.float64) if p_iono_unc else None
         xs = np.asarray(f[p_x][()], dtype=np.float64) if p_x else None
         ys = np.asarray(f[p_y][()], dtype=np.float64) if p_y else None
 
@@ -459,71 +398,159 @@ def read_gunw(
 
         wavelength = read_wavelength(f, datasets)
 
-    # Ionospheric correction. L-band phase delay scales as 1/f^2, so NISAR is
-    # far more affected than C-band and ships an estimated screen with every
-    # GUNW. Subtract it unless explicitly told not to.
+    # Ionospheric correction. GUNW publishes an estimated screen and its
+    # uncertainty. The screen is not applied to the phase in the source product
+    # by default (ASF GUNW guide); when this reader applies it, only pixels with
+    # finite screen AND finite uncertainty are eligible. No arbitrary magnitude
+    # threshold is imposed on uncertainty; the values are exposed for review.
     iono_rms_mm = None
     scale = -(wavelength / (4.0 * math.pi)) * 1000.0
     if flip_sign:
         scale = -scale
 
-    # Which pixels carry no phase, decided on the RAW array. GUNW fills nodata
-    # with exact zeros, and the ionosphere screen is not zero there - so
-    # subtracting the screen first turns every nodata pixel into a small
-    # non-zero number and the `phase != 0` test below stops finding any of
-    # them. That was survivable only because connectedComponents happens to
-    # reject the same pixels, and that layer is optional.
-    has_phase = phase != 0
+    # Decide phase NoData on the raw phase, before correction. GUNW commonly
+    # encodes unfilled phase cells as exact zero while the screen can be nonzero.
+    has_phase = np.isfinite(phase) & (phase != 0)
+    iono_correction_valid = np.ones(phase.shape, dtype=bool)
+    iono_correction_status = "not_requested_raw_phase"
 
-    if iono is not None and apply_iono and iono.shape == phase.shape:
-        good = np.isfinite(iono)
-        if good.any():
-            iono_rms_mm = float(np.sqrt(np.nanmean((iono[good] * scale) ** 2)))
-        phase = phase - np.nan_to_num(iono, nan=0.0)
-        logger.info("Ionosphere screen subtracted (RMS %.1f mm in LOS)",
-                    iono_rms_mm if iono_rms_mm is not None else float("nan"))
-    elif iono is not None and not apply_iono:
-        logger.warning("Ionosphere screen present but NOT applied (--no-iono)")
+    if apply_iono:
+        uncertainty_ready = (
+            iono_uncertainty is not None
+            and iono_uncertainty.shape == phase.shape
+            and np.isfinite(iono_uncertainty).any()
+        )
+        screen_ready = iono is not None and iono.shape == phase.shape
+        if not screen_ready:
+            iono_correction_valid[:] = False
+            phase = np.full_like(phase, np.nan, dtype=np.float64)
+            iono_correction_status = "blocked_missing_or_misaligned_screen"
+            logger.warning("Ionosphere correction blocked: phase screen missing or grid-misaligned.")
+        elif not uncertainty_ready:
+            iono_correction_valid[:] = False
+            phase = np.full_like(phase, np.nan, dtype=np.float64)
+            iono_correction_status = "blocked_missing_or_misaligned_uncertainty"
+            logger.warning(
+                "Ionosphere correction blocked: the matching ionospherePhaseScreenUncertainty "
+                "layer is missing, misaligned, or has no finite samples. No corrected displacement will be qualified."
+            )
+        else:
+            iono_correction_valid = np.isfinite(iono) & np.isfinite(iono_uncertainty)
+            # Do not substitute zero for invalid screen samples: that silently
+            # treats an uncorrected pixel as a corrected one. Invalid samples
+            # remain NaN and are rejected by the downstream validity mask.
+            corrected = np.full_like(phase, np.nan, dtype=np.float64)
+            corrected[iono_correction_valid] = (
+                phase[iono_correction_valid] - iono[iono_correction_valid]
+            )
+            phase = corrected
+            if iono_correction_valid.any():
+                iono_rms_mm = float(np.sqrt(np.mean((iono[iono_correction_valid] * scale) ** 2)))
+            iono_correction_status = "applied_on_finite_screen_and_uncertainty_pixels"
+            logger.info("Ionosphere screen subtracted on %d pixels (screen RMS %.1f mm in LOS)",
+                        int(iono_correction_valid.sum()),
+                        iono_rms_mm if iono_rms_mm is not None else float("nan"))
+    elif iono is not None:
+        logger.warning("Ionosphere screen present but NOT applied (--no-iono); values remain uncorrected phase-derived estimates.")
 
-    # phase -> LOS displacement, millimetres
+    # phase -> LOS displacement, millimetres. Pixels blocked from ionosphere
+    # correction remain non-finite and cannot pass this gate.
     disp = phase * scale
-
     valid = np.isfinite(disp) & has_phase
-    gates = {"finite": int(valid.sum())}
+    if apply_iono:
+        valid &= iono_correction_valid
+    gates = {"finite_nonzero_raw_phase": int((np.isfinite(disp) & has_phase).sum())}
+    if apply_iono:
+        gates["finite_iono_screen_and_uncertainty"] = int(iono_correction_valid.sum())
+        gates["after_iono_correction_validity"] = int(valid.sum())
 
     if coherence is not None:
-        valid &= coherence >= coherence_threshold
+        valid &= np.isfinite(coherence) & (coherence >= coherence_threshold)
         gates[f"coherence>={coherence_threshold}"] = int(valid.sum())
     if components is not None:
-        valid &= components > 0          # component 0 = not reliably unwrapped
+        valid &= np.isfinite(components) & (components > 0)  # component 0 = not reliably unwrapped
         gates["connected_component>0"] = int(valid.sum())
-    mask_diagnostics = None
+
+    mask_diagnostics = {
+        "available": losmask is not None and np.shape(losmask) == valid.shape,
+        "dtype": str(np.asarray(losmask).dtype) if losmask is not None else None,
+        "bit_packed_uint32_semantics_applied": False,
+        "base_wrs_land_valid_subswath_pixels": 0,
+        "reference_input_exception_pixels": 0,
+        "secondary_input_exception_pixels": 0,
+        "ionosphere_filter_flag_pixels": 0,
+        "packed_values_ge_2pow24_quarantined_pixels": 0,
+        "strict_mask_pass_pixels": 0,
+    }
     if losmask is not None and losmask.shape == valid.shape:
-        # GUNW mask is packed: decode WRS only from the low byte, preserve the
-        # input-exception masks and bit-24 ionosphere interpolation flag, and
-        # conservatively reject high-bit WRS values affected by known float32
-        # geocoding precision loss. Do not interpret the full uint32 as decimal.
-        decoded_mask = decode_gunw_mask(losmask)
-        usable = decoded_mask["usable"]
-        mask_diagnostics = decoded_mask["summary"]
-        valid &= usable
-        gates["land + valid subswath (strict packed mask)"] = int(valid.sum())
-        if mask_diagnostics["ionosphere_filter_flag_pixels"]:
-            logger.warning(
-                "%d GUNW mask pixels carry the bit-24 ionosphere filter/interpolation flag; excluded from strict analysis.",
-                mask_diagnostics["ionosphere_filter_flag_pixels"],
+        # GUNW `mask` is a packed uint32 word, NOT a decimal three-digit value.
+        # Only bits 0-7 hold the WRS code. The higher bytes encode input-data
+        # exceptions and ionosphere filtering/interpolation flags. ISCE3 PR #381
+        # documents that float32 geocoding can alter low-byte WRS bits for words
+        # >= 2**24, so these words are conservatively quarantined until an
+        # independently verified source/processing path resolves the ambiguity.
+        raw_mask = np.asarray(losmask)
+        # The NISAR GUNW source schema defines this categorical word as uint32.
+        # Smaller integer widths may be legacy fixtures or transformed rasters;
+        # do not infer native packed-field semantics from a converted dtype.
+        integer_dtype = raw_mask.dtype == np.dtype("uint32")
+        if integer_dtype:
+            word_range_ok = np.ones(raw_mask.shape, dtype=bool)
+            if np.issubdtype(raw_mask.dtype, np.signedinteger):
+                word_range_ok &= raw_mask >= 0
+            if raw_mask.dtype.itemsize > 4:
+                word_range_ok &= raw_mask <= np.iinfo(np.uint32).max
+            words = np.zeros(raw_mask.shape, dtype=np.uint32)
+            word_valid = word_range_ok
+            words[word_valid] = raw_mask[word_valid].astype(np.uint32, copy=False)
+            wrs = words & np.uint32(0xFF)
+            secondary_exception = (words >> np.uint32(8)) & np.uint32(0xFF)
+            reference_exception = (words >> np.uint32(16)) & np.uint32(0xFF)
+            ionosphere_flag = (words & np.uint32(1 << 24)) != 0
+            packed_ambiguous = words >= np.uint32(1 << 24)
+            water = wrs // np.uint32(100)
+            ref_sub = (wrs // np.uint32(10)) % np.uint32(10)
+            sec_sub = wrs % np.uint32(10)
+            base_usable = (
+                word_valid & (wrs != np.uint32(255)) & (water == 0)
+                & (ref_sub > 0) & (sec_sub > 0)
             )
-        if mask_diagnostics["packed_wrs_decode_ambiguous_pixels"]:
-            logger.warning(
-                "%d GUNW mask pixels are >= 2^24 and their WRS low byte may be ambiguous due to documented float32 geocoding precision loss; excluded from strict analysis.",
-                mask_diagnostics["packed_wrs_decode_ambiguous_pixels"],
-            )
-        if mask_diagnostics["reference_input_exception_nonzero_pixels"] or mask_diagnostics["secondary_input_exception_nonzero_pixels"]:
-            logger.warning(
-                "GUNW mask has input exception flags (reference=%d, secondary=%d pixels); excluded from strict analysis.",
-                mask_diagnostics["reference_input_exception_nonzero_pixels"],
-                mask_diagnostics["secondary_input_exception_nonzero_pixels"],
-            )
+            exception_clear = (secondary_exception == 0) & (reference_exception == 0)
+            ionosphere_clear = ~ionosphere_flag
+            precision_safe = ~packed_ambiguous
+            usable = base_usable & exception_clear & ionosphere_clear & precision_safe
+            usable_count = int(usable.sum())
+            valid &= usable
+            gates["WRS dry land + both subswaths"] = int((valid & base_usable).sum())
+            gates["input exception bytes clear"] = int((valid & exception_clear).sum())
+            gates["ionosphere filter/interpolation flag clear"] = int((valid & ionosphere_clear).sum())
+            gates["packed mask precision quarantine applied"] = int(valid.sum())
+            mask_diagnostics.update({
+                "bit_packed_uint32_semantics_applied": True,
+                "base_wrs_land_valid_subswath_pixels": int(base_usable.sum()),
+                "reference_input_exception_pixels": int((word_valid & (reference_exception != 0)).sum()),
+                "secondary_input_exception_pixels": int((word_valid & (secondary_exception != 0)).sum()),
+                "ionosphere_filter_flag_pixels": int((word_valid & ionosphere_flag).sum()),
+                "packed_values_ge_2pow24_quarantined_pixels": int((word_valid & packed_ambiguous).sum()),
+                "strict_mask_pass_pixels": usable_count,
+                "wrs_low_byte_counts": {str(int(k)): int(v) for k, v in zip(*np.unique(wrs[word_valid], return_counts=True))},
+            })
+        else:
+            # A float-typed categorical mask may already have lost bit precision.
+            # Never round it back to an integer and pretend the original word is known.
+            valid[:] = False
+            logger.warning("Packed GUNW mask dtype %s is not integer; refusing to decode it as a valid mask.", raw_mask.dtype)
+            gates["native_uint32_packed_mask_required"] = 0
+            mask_diagnostics["reason"] = "non_native_uint32_mask_dtype_precision_unresolved"
+        gates["after_strict_packed_mask"] = int(valid.sum())
+    else:
+        # Without a mask there is no defensible way to verify water/subswath
+        # coverage for a phase-derived measurement; fail closed rather than
+        # silently producing unmasked displacement values.
+        valid[:] = False
+        gates["required_packed_mask_present"] = 0
+        mask_diagnostics["reason"] = "missing_or_misaligned_mask"
+        logger.warning("Required GUNW packed mask missing or grid-misaligned; no pixels are qualified.")
 
     # Quality mask WITHOUT the AOI clip. The reference point is usually chosen
     # on stable ground outside the area of interest, so it must not be clipped
@@ -713,6 +740,12 @@ def read_gunw(
         # because the two frames differ in size by 1.5x.
         "aoi_px": int(aoi_mask.sum()) if aoi_mask is not None else None,
         "iono_rms_mm": iono_rms_mm,
+        "ionosphere_correction_applied": bool(apply_iono and iono_correction_status == "applied_on_finite_screen_and_uncertainty_pixels"),
+        "ionosphere_correction_status": iono_correction_status,
+        "ionosphere_uncertainty_available": iono_uncertainty is not None and iono_uncertainty.shape == phase.shape,
+        "ionosphere_uncertainty_finite_pixels": int(np.isfinite(iono_uncertainty).sum()) if iono_uncertainty is not None else 0,
+        "ionosphere_correction_valid_pixels": int(iono_correction_valid.sum()),
+        "mask_diagnostics": mask_diagnostics,
         "ref_value_mm": ref_value,
         # Where the reference was taken, in grid indices. Exposed so a caller
         # can check it landed on stable ground outside the AOI rather than
@@ -720,7 +753,6 @@ def read_gunw(
         # answer and is invisible in the returned displacement.
         "ref_grid": _auto_grid_ref,
         "gates": gates,
-        "mask_diagnostics": mask_diagnostics,
     }
 
 
@@ -738,13 +770,6 @@ def report(result: dict) -> dict:
         print(f"  projection      EPSG:{result['epsg']}")
     if result.get("iono_rms_mm") is not None:
         print(f"  iono screen     {result['iono_rms_mm']:.1f} mm RMS (subtracted)")
-    mask_diag = result.get("mask_diagnostics")
-    if mask_diag:
-        print("  GUNW mask       packed uint32; strict WRS/exception/ionosphere checks applied")
-        print(f"  mask WRS-valid  {mask_diag['base_wrs_land_valid_subswath_pixels']:,} px before packed/flag exclusions")
-        print(f"  mask strict     {mask_diag['strict_usable_pixels']:,} px after exclusions")
-        if mask_diag['ionosphere_filter_flag_pixels'] or mask_diag['packed_wrs_decode_ambiguous_pixels']:
-            print(f"  mask flagged    ionosphere={mask_diag['ionosphere_filter_flag_pixels']:,}, ambiguous-high-bit={mask_diag['packed_wrs_decode_ambiguous_pixels']:,}")
 
     # Percentages here are of the FRAME, and are labelled so, because a gate
     # applied before the AOI clip has no AOI to be a fraction of. The coverage
