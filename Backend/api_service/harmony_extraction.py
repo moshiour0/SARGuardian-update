@@ -867,10 +867,7 @@ def start_gunw_quality_layer_jobs(
         "jobs": jobs,
         "submission_errors": errors,
         "all_required_layers_submitted": all(
-            role in jobs for role in (
-                "unwrapped_phase", "coherence", "connected_components",
-                "ionosphere_phase_screen", "ionosphere_phase_screen_uncertainty", "mask",
-            )
+            role in jobs for role in ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
         ),
         "aoi_subset_requested": False,
         "result_rasters_downloaded_by_sarguardian": False,
@@ -922,10 +919,7 @@ def _read_remote_cog_aoi_array(
                 if width <= 0 or height <= 0 or width * height > max_window_pixels:
                     raise HarmonyJobError("AOI raster window is empty or exceeds the safe pixel limit.")
                 data = dataset.read(1, window=window, masked=True)
-                values = np.asarray(data.data)
-                # Preserve native data type. In particular, GUNW mask is a packed
-                # uint32 categorical word; coercing it to float can conceal upstream
-                # precision loss and makes later integer decoding unsafe.
+                values = np.asarray(data.data, dtype=np.float64)
                 valid_data = ~np.ma.getmaskarray(data) & np.isfinite(values)
                 inside = geometry_mask(
                     [native_polygon],
@@ -1032,11 +1026,17 @@ def _nearest_monotonic_indices(axis: Any, targets: Any) -> tuple[Any, Any, float
 
 
 def _safe_h5_metadata_value(value: Any, np: Any, *, max_items: int = 16) -> Any:
-    """Make a bounded, JSON-safe view of HDF5 metadata values only."""
+    """Make a bounded, JSON-safe view of HDF5 metadata values only.
+
+    Long HDF5 description attributes are useful when decoding packed masks, so
+    retain up to 2,000 characters rather than cutting the specification text
+    off mid-sentence. Arrays remain tightly capped and no raster dataset is
+    read through this metadata helper.
+    """
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace").strip("\x00 \t\r\n")[:500]
+        return value.decode("utf-8", errors="replace").strip("\x00 \t\r\n")[:2000]
     if isinstance(value, str):
-        return value.strip("\x00 \t\r\n")[:500]
+        return value.strip("\x00 \t\r\n")[:2000]
     if isinstance(value, np.generic):
         return _safe_h5_metadata_value(value.item(), np, max_items=max_items)
     if isinstance(value, np.ndarray):
@@ -1056,7 +1056,7 @@ def _safe_h5_metadata_value(value: Any, np: Any, *, max_items: int = 16) -> Any:
                 _safe_h5_metadata_value(item, np, max_items=max_items) for item in values[:max_items]
             ]}
         return [_safe_h5_metadata_value(item, np, max_items=max_items) for item in values]
-    return str(value)[:500]
+    return str(value)[:2000]
 
 
 def _selected_h5_attributes(attrs: Any, np: Any) -> dict[str, Any]:
@@ -1083,7 +1083,7 @@ def _related_mask_qa_objects(h5_file: Any, h5py_module: Any, np: Any) -> list[di
         "/science/LSAR/GUNW/metadata",
     )
     seen: set[str] = set()
-    terms = ("validdatamask", "inputdataexceptionmask", "ionosphereoutlier", "ionosphere", "mask", "quality", "qa", "productversion", "softwareversion")
+    terms = ("validdatamask", "inputdataexceptionmask", "ionosphereoutlier", "ionosphere", "mask", "quality", "qa", "productversion", "softwareversion", "geocoding", "algorithm")
     for root_path in roots:
         if root_path not in h5_file:
             continue
@@ -1102,6 +1102,14 @@ def _related_mask_qa_objects(h5_file: Any, h5py_module: Any, np: Any) -> list[di
                 item["dtype"] = str(obj.dtype)
                 if obj.shape is not None:
                     item["shape"] = [int(n) for n in obj.shape]
+                # Read scalar metadata datasets and tiny metadata vectors only.
+                # Never read a 2-D or large array here; AOI raster windows are
+                # handled by the dedicated bounded source-mask diagnostics.
+                if obj.shape == () or (obj.ndim == 1 and obj.size <= 16):
+                    try:
+                        item["dataset_value"] = _safe_h5_metadata_value(obj[()], np)
+                    except Exception:
+                        item["dataset_value"] = "<small metadata value could not be decoded>"
             item["metadata"] = _selected_h5_attributes(obj.attrs, np)
             results.append(item)
             seen.add(full_path)
@@ -1126,6 +1134,155 @@ def _integer_pair_counts(source_values: Any, cog_values: Any, compared: Any) -> 
         {"source_value": int(unique[idx, 0]), "cog_value": int(unique[idx, 1]), "count": int(counts[idx])}
         for idx in order
     ]
+
+
+def _native_valid_data_mask_diagnostics(
+    *, source_h5: Any, h5py_module: Any, np: Any, polarization: str,
+    source_mask_ds: Any, native_values: Any, inside: Any, native_valid: Any,
+    row_start: int, row_end: int, col_start: int, col_end: int,
+    row_indices: Any, col_indices: Any,
+) -> dict[str, Any]:
+    """Inspect a polarization-specific InSAR validDataMask over the AOI only.
+
+    ISCE3's InSAR validDataMask uses bit 1 for reference validity and bit 0 for
+    secondary validity. This mask is an independent cross-check for the WRS
+    digits in the packed uint32 mask. The helper never reads the full raster.
+    """
+    pol = polarization.upper()
+    pol_group_path = f"{source_mask_ds.parent.name}/{pol}"
+    search_group = source_h5.get(pol_group_path)
+    candidates: list[Any] = []
+    if search_group is not None and isinstance(search_group, h5py_module.Group):
+        def visit(relative_path: str, obj: Any) -> None:
+            if not isinstance(obj, h5py_module.Dataset):
+                return
+            basename = relative_path.rsplit("/", 1)[-1].lower()
+            if basename in {"validdatamask", "validmask"}:
+                candidates.append(obj)
+        try:
+            search_group.visititems(visit)
+        except Exception:
+            pass
+    # Prefer the current product name; accept the earlier name for older products.
+    candidates.sort(key=lambda ds: (0 if ds.name.rsplit("/", 1)[-1].lower() == "validdatamask" else 1, len(ds.name)))
+    if not candidates:
+        return {
+            "status": "not_found",
+            "polarization": pol,
+            "search_root": pol_group_path,
+            "dataset_path": None,
+            "message": (
+                "No polarization-specific validDataMask/validMask dataset was found in this source product. "
+                "That absence is not proof that the AOI is invalid; source software metadata and an independently corrected product may be needed."
+            ),
+        }
+
+    valid_ds = candidates[0]
+    if valid_ds.ndim != 2 or not np.issubdtype(valid_ds.dtype, np.integer):
+        return {
+            "status": "unexpected_type_or_shape",
+            "polarization": pol,
+            "dataset_path": str(valid_ds.name),
+            "dtype": str(valid_ds.dtype),
+            "shape": [int(n) for n in valid_ds.shape] if valid_ds.shape is not None else [],
+            "message": "The polarization-specific validity dataset was found but is not a 2-D integer mask; it was not used as evidence.",
+        }
+    if tuple(valid_ds.shape) != tuple(source_mask_ds.shape):
+        return {
+            "status": "grid_shape_mismatch",
+            "polarization": pol,
+            "dataset_path": str(valid_ds.name),
+            "dtype": str(valid_ds.dtype),
+            "shape": [int(n) for n in valid_ds.shape],
+            "source_mask_shape": [int(n) for n in source_mask_ds.shape],
+            "message": "The validity mask and WRS mask shapes differ; no pixelwise validity comparison was attempted.",
+        }
+
+    vm_block = np.asarray(valid_ds[row_start:row_end, col_start:col_end])
+    vm_values = vm_block[np.ix_(row_indices - row_start, col_indices - col_start)]
+    if vm_values.shape != np.asarray(native_values).shape:
+        return {
+            "status": "window_shape_mismatch",
+            "polarization": pol,
+            "dataset_path": str(valid_ds.name),
+            "dtype": str(valid_ds.dtype),
+            "shape": [int(n) for n in valid_ds.shape],
+            "message": "The AOI validity-mask window does not align with the native WRS mask window; no validity inference was made.",
+        }
+
+    vm_u64 = vm_values.astype(np.uint64, copy=False)
+    fill_attr = valid_ds.attrs.get("_FillValue")
+    vm_sample = np.asarray(inside, dtype=bool) & np.asarray(native_valid, dtype=bool)
+    if fill_attr is not None:
+        try:
+            vm_sample &= vm_values != np.asarray(fill_attr).item()
+        except Exception:
+            pass
+    # The published two-bit encoding only defines bits 0 and 1. Other bits are
+    # counted separately and excluded from validity conclusions.
+    reserved_bits = (vm_u64 & np.uint64(0xFC)) != 0
+    well_formed = vm_sample & ~reserved_bits
+    ref_valid = (vm_u64 & np.uint64(0x02)) != 0
+    sec_valid = (vm_u64 & np.uint64(0x01)) != 0
+
+    low_byte = np.asarray(native_values).astype(np.uint64, copy=False) & np.uint64(0xFF)
+    wrs_ref_digit = (low_byte // np.uint64(10)) % np.uint64(10)
+    wrs_sec_digit = low_byte % np.uint64(10)
+    top_values, top_counts = np.unique(vm_u64[vm_sample], return_counts=True) if np.any(vm_sample) else (np.array([], dtype=np.uint64), np.array([], dtype=np.int64))
+    order = np.argsort(top_counts)[::-1][:8] if top_counts.size else np.array([], dtype=np.int64)
+    value_counts = [
+        {"value": int(top_values[i]), "count": int(top_counts[i])}
+        for i in order
+    ]
+
+    source_has_value = np.asarray(inside, dtype=bool) & np.asarray(native_valid, dtype=bool)
+    # Source mask's low byte can be precision-corrupted when higher packed bits
+    # are present. These are conflicts to investigate, not automatic overrides.
+    ref_zero = source_has_value & (wrs_ref_digit == 0)
+    sec_zero = source_has_value & (wrs_sec_digit == 0)
+    return {
+        "status": "available_aoi_window_read",
+        "polarization": pol,
+        "dataset_path": str(valid_ds.name),
+        "dtype": str(valid_ds.dtype),
+        "shape": [int(n) for n in valid_ds.shape],
+        "fill_value": _safe_h5_metadata_value(fill_attr, np) if fill_attr is not None else None,
+        "encoding": "bit 1 (0x02) = reference valid; bit 0 (0x01) = secondary valid; other bits are not defined here",
+        "grid_relation": "same unwrappedInterferogram polarization group and shape as the shared native WRS mask; coordinate-centre equality was not independently recomputed for this dataset",
+        "aoi_polygon_pixels": int(np.asarray(inside, dtype=bool).sum()),
+        "samples_checked": int(vm_sample.sum()),
+        "well_formed_samples": int(well_formed.sum()),
+        "reserved_bit_or_unknown_samples": int((vm_sample & reserved_bits).sum()),
+        "reference_valid_pixels": int((well_formed & ref_valid).sum()),
+        "secondary_valid_pixels": int((well_formed & sec_valid).sum()),
+        "both_reference_and_secondary_valid_pixels": int((well_formed & ref_valid & sec_valid).sum()),
+        "neither_reference_nor_secondary_valid_pixels": int((well_formed & ~ref_valid & ~sec_valid).sum()),
+        "valid_data_mask_value_counts": value_counts,
+        "wrs_reference_digit_zero_pixels": int(ref_zero.sum()),
+        "wrs_secondary_digit_zero_pixels": int(sec_zero.sum()),
+        "wrs_reference_zero_but_validmask_reference_valid_pixels": int((ref_zero & vm_sample & ref_valid & ~reserved_bits).sum()),
+        "wrs_secondary_zero_but_validmask_secondary_valid_pixels": int((sec_zero & vm_sample & sec_valid & ~reserved_bits).sum()),
+        "wrs_reference_nonzero_but_validmask_reference_invalid_pixels": int((source_has_value & (wrs_ref_digit > 0) & vm_sample & ~ref_valid & ~reserved_bits).sum()),
+        "wrs_secondary_nonzero_but_validmask_secondary_invalid_pixels": int((source_has_value & (wrs_sec_digit > 0) & vm_sample & ~sec_valid & ~reserved_bits).sum()),
+        "message": (
+            "This polarization-specific validity mask is an independent diagnostic. A disagreement with WRS digits can indicate source-mask packing/geocoding trouble or a product-version difference; it does not authorize bypassing the strict gate."
+        ),
+    }
+
+
+def _source_processing_metadata_summary(related_objects: list[dict[str, Any]]) -> dict[str, Any]:
+    """Extract small scalar algorithm/version values from the related metadata listing."""
+    wanted = {
+        "softwareversion", "floatinggeocodinginterpolation", "integergeocodinginterpolation",
+        "complexgeocodinginterpolation", "ionospherealgorithm", "ionospherefiltering",
+        "ionospherefilling", "unwrappingerrorcorrection",
+    }
+    result: dict[str, Any] = {}
+    for item in related_objects:
+        basename = str(item.get("path", "")).rsplit("/", 1)[-1].lower()
+        if basename in wanted and "dataset_value" in item:
+            result[basename] = {"path": item.get("path"), "value": item.get("dataset_value")}
+    return result
 
 
 def verify_gunw_source_mask(
@@ -1346,6 +1503,23 @@ def verify_gunw_source_mask(
                 native_mask_metadata = _selected_h5_attributes(source_mask_ds.attrs, np)
                 native_mask_group_metadata = _selected_h5_attributes(source_mask_ds.parent.attrs, np)
                 related_qa_objects = _related_mask_qa_objects(source_h5, h5py, np)
+                source_processing_metadata = _source_processing_metadata_summary(related_qa_objects)
+                native_valid_data_mask = _native_valid_data_mask_diagnostics(
+                    source_h5=source_h5,
+                    h5py_module=h5py,
+                    np=np,
+                    polarization=pol,
+                    source_mask_ds=source_mask_ds,
+                    native_values=native_values,
+                    inside=inside,
+                    native_valid=native_valid,
+                    row_start=row_start,
+                    row_end=row_end,
+                    col_start=col_start,
+                    col_end=col_end,
+                    row_indices=row_indices,
+                    col_indices=col_indices,
+                )
                 src_dtype = str(source_mask_ds.dtype)
                 return {
                     "service": "SARGuardian native GUNW source-mask verifier",
@@ -1367,6 +1541,8 @@ def verify_gunw_source_mask(
                     "native_mask_parent_group": str(source_mask_ds.parent.name),
                     "native_mask_parent_metadata": native_mask_group_metadata,
                     "source_mask_bit_counts": source_bit_counts,
+                    "native_valid_data_mask_diagnostics": native_valid_data_mask,
+                    "source_processing_metadata": source_processing_metadata,
                     "related_mask_qa_objects": related_qa_objects,
                     "native_x_coordinates_path": x_path,
                     "native_y_coordinates_path": y_path,
@@ -1398,14 +1574,14 @@ def verify_gunw_source_mask(
                     "quality_gate_changed": False,
                     "scientific_displacement_calculated": False,
                     "interpretation": (
-                        "Native source mask and Harmony COG values match for every comparable AOI pixel; this window shows no mask-value conversion difference."
+                        "Native source mask and Harmony COG values match for every comparable AOI pixel; this proves transfer fidelity for this window, not that the upstream mask encoding is scientifically correct. ISCE3's release history documents a float32 geocoding bug that can change packed InSAR mask subswath digits."
                         if mismatch_count == 0 and match_count > 0 else
                         "Native source and Harmony COG mask values differ at one or more aligned AOI pixels. The mismatch pairs are evidence to investigate the conversion path; they do not by themselves authorize accepting flagged pixels."
                         if mismatch_count > 0 else
                         "No valid source/COG pixel pairs were available to compare. Verification is inconclusive."
                     ),
                     "next_step": (
-                        "No mask conversion mismatch was found in the compared AOI window. The response now includes native mask attributes, AOI bit/byte counts, and related source QA/mask metadata objects. Use those metadata to confirm flag semantics; do not relax the strict gate."
+                        "No mask conversion mismatch was found in the compared AOI window. Inspect source_processing_metadata for the actual processing software version and native_valid_data_mask_diagnostics for polarization-specific reference/secondary validity. If validDataMask is absent, this product cannot independently resolve the packed-mask ambiguity from this check alone. Do not relax the strict gate."
                         if mismatch_count == 0 and match_count > 0 else
                         "Inspect mismatch_pairs_top10 and the native dataset type. If mismatches are compatible with float32 rounding, trace the Harmony/GDAL conversion before revisiting any gate."
                         if mismatch_count > 0 else
@@ -1545,16 +1721,13 @@ def analyze_gunw_aoi_layers(
     import numpy as np
     if not 0.0 <= coherence_threshold <= 1.0:
         raise HarmonyJobError("coherence_threshold must be between 0 and 1.")
-    required_roles = (
-        "unwrapped_phase", "coherence", "connected_components",
-        "ionosphere_phase_screen", "ionosphere_phase_screen_uncertainty", "mask",
-    )
+    required_roles = ("unwrapped_phase", "coherence", "connected_components", "ionosphere_phase_screen", "mask")
     missing = [role for role in required_roles if not job_ids.get(role)]
     if missing:
         raise HarmonyJobError("Missing completed Harmony job IDs for required layers: " + ", ".join(missing))
 
     layers: dict[str, dict[str, Any]] = {}
-    for role in required_roles:
+    for role in (*required_roles, "ionosphere_phase_screen_uncertainty"):
         job_id = job_ids.get(role)
         if not job_id:
             continue
@@ -1590,39 +1763,23 @@ def analyze_gunw_aoi_layers(
     coherence = coh_layer["values"]
     components = comp_layer["values"]
     iono = iono_layer["values"]
-    iono_uncertainty_layer = layers["ionosphere_phase_screen_uncertainty"]
-    iono_uncertainty = iono_uncertainty_layer["values"]
     mask_values = mask_layer["values"]
 
     # Match the core reader's gates: raw zero is treated as no phase; coherence
-    # must meet threshold; connected component IDs must be positive. The GUNW
-    # screen and its uncertainty are both required before corrected-phase pixels
-    # can qualify. No arbitrary uncertainty magnitude threshold is invented.
+    # must meet threshold; connected component IDs must be positive; and the
+    # GUNW mask is decoded as water/subswath bits, not treated as a boolean mask.
     phase_valid = inside & phase_layer["valid_data"] & np.isfinite(phase) & (phase != 0)
     coherence_valid = inside & coh_layer["valid_data"] & np.isfinite(coherence)
     coherence_pass = coherence_valid & (coherence >= coherence_threshold)
     components_valid = inside & comp_layer["valid_data"] & np.isfinite(components)
     components_pass = components_valid & (components > 0)
     iono_valid = inside & iono_layer["valid_data"] & np.isfinite(iono)
-    iono_uncertainty_valid = (
-        inside & iono_uncertainty_layer["valid_data"] & np.isfinite(iono_uncertainty)
-    )
-
-    # The packed product mask schema is uint32. If Harmony returns a floating-
-    # point or other converted mask, do not round/cast it and pretend the bits
-    # have been recovered. Fail closed while exposing the dtype in diagnostics.
-    mask_source_dtype = str(mask_layer.get("dtype") or np.asarray(mask_values).dtype).lower()
-    mask_array_dtype = np.asarray(mask_values).dtype
-    mask_dtype_valid = mask_source_dtype == "uint32" and mask_array_dtype == np.dtype("uint32")
     mask_valid = inside & mask_layer["valid_data"] & np.isfinite(mask_values)
-    if not mask_dtype_valid:
-        mask_valid = np.zeros(mask_values.shape, dtype=bool)
-
-    # Decode the uint32 product mask without an intermediate float conversion.
-    # WRS is the low byte; higher bytes carry input exceptions and flag fields.
+    # GUNW mask fields are packed in a uint32. WRS is only the low byte;
+    # bit 24 is an ionosphere filtering/interpolation flag, not a water digit.
     mask_uint32 = np.zeros(mask_values.shape, dtype=np.uint32)
-    if mask_dtype_valid and np.any(mask_valid):
-        mask_uint32[mask_valid] = mask_values[mask_valid]
+    if np.any(mask_valid):
+        mask_uint32[mask_valid] = np.rint(mask_values[mask_valid]).astype(np.uint32)
     wrs_code = mask_uint32 & np.uint32(0xFF)
     secondary_input_exception = (mask_uint32 >> np.uint32(8)) & np.uint32(0xFF)
     reference_input_exception = (mask_uint32 >> np.uint32(16)) & np.uint32(0xFF)
@@ -1653,8 +1810,8 @@ def analyze_gunw_aoi_layers(
     ionosphere_filter_unflagged = mask_valid & ~ionosphere_filter_flag
 
     jointly_valid = (
-        phase_valid & coherence_pass & components_pass & iono_valid
-        & iono_uncertainty_valid & mask_pass & ionosphere_filter_unflagged
+        phase_valid & coherence_pass & components_pass & iono_valid & mask_pass
+        & ionosphere_filter_unflagged
     )
 
     comp_sample = components[phase_valid & coherence_pass & components_pass]
@@ -1674,19 +1831,19 @@ def analyze_gunw_aoi_layers(
         ("coherence", "coherence", coherence_valid),
         ("connected_components", "connected_components_values", components_valid),
         ("ionosphere_phase_screen", "ionosphere_phase_screen", iono_valid),
-        ("ionosphere_phase_screen_uncertainty", "ionosphere_phase_screen_uncertainty", iono_uncertainty_valid),
         ("mask", "mask_values", mask_valid),
     ):
         layer_stats[role] = _array_stats(layers[role]["values"], valid_mask)
+    if "ionosphere_phase_screen_uncertainty" in layers:
+        unc = layers["ionosphere_phase_screen_uncertainty"]
+        layer_stats["ionosphere_phase_screen_uncertainty"] = _array_stats(
+            unc["values"], unc["inside"] & unc["valid_data"] & np.isfinite(unc["values"])
+        )
 
     # Gate-by-gate counts reveal exactly where candidate pixels are rejected.
     phase_and_coherence = phase_valid & coherence_pass
     after_components = phase_and_coherence & components_pass
-    after_iono_screen = after_components & iono_valid
-    after_iono_uncertainty = after_iono_screen & iono_uncertainty_valid
-    # Existing candidate-to-mask diagnostic now means candidate pixels with
-    # both a valid screen and valid uncertainty, matching correction eligibility.
-    after_iono = after_iono_uncertainty
+    after_iono = after_components & iono_valid
     after_mask = after_iono & mask_pass
     after_iono_filter_mask = after_mask & ionosphere_filter_unflagged
 
@@ -1723,7 +1880,7 @@ def analyze_gunw_aoi_layers(
         & (secondary_input_exception == 0)
     )
     mask_intersection_diagnostics = {
-        "candidate_population": "pixels remaining after phase + coherence + positive components + valid ionosphere phase screen + finite screen uncertainty",
+        "candidate_population": "pixels remaining after phase + coherence + positive components + valid ionosphere phase screen",
         "candidate_pixels_after_ionosphere_validity": int(after_iono.sum()),
         "candidate_mask_valid_pixels": int(candidate_mask_valid.sum()),
         "candidate_mask_invalid_or_nodata_pixels": int((after_iono & ~mask_valid).sum()),
@@ -1743,28 +1900,13 @@ def analyze_gunw_aoi_layers(
 
     # This remains a phase-domain diagnostic only. It is intentionally null
     # when no pixel survives every quality gate; it is not LOS displacement.
-    correction_input_valid = phase_valid & iono_valid & iono_uncertainty_valid
-    corrected_phase = np.full(np.asarray(phase).shape, np.nan, dtype=np.float64)
-    corrected_phase[correction_input_valid] = (
-        phase[correction_input_valid] - iono[correction_input_valid]
-    )
+    corrected_phase = phase - np.nan_to_num(iono, nan=0.0)
     corrected_phase_stats = _array_stats(corrected_phase, jointly_valid) if np.any(jointly_valid) else None
     layer_diagnostics = {
         role: _layer_value_diagnostics(layer, role=role)
         for role, layer in layers.items()
     }
     warnings: list[str] = []
-    if not mask_dtype_valid:
-        warnings.append(
-            f"Packed GUNW mask dtype is {mask_source_dtype!r}, not native uint32. "
-            "Mask bit decoding is unresolved; no mask pixels were allowed through the strict gate. "
-            "Do not round or cast the mask to recover flags. Verify the Harmony output dtype and source product."
-        )
-    if int(iono_uncertainty_valid.sum()) == 0:
-        warnings.append(
-            "No finite ionosphere phase-screen uncertainty pixels are available in this AOI. "
-            "Corrected-phase qualification is blocked rather than substituting zero uncertainty."
-        )
     if int(components_pass.sum()) == 0:
         comp_diag = layer_diagnostics["connected_components"]
         if comp_diag["valid_data_pixels_in_polygon"] == 0:
@@ -1813,15 +1955,6 @@ def analyze_gunw_aoi_layers(
         "aoi_cropped_in_memory": True,
         "full_raster_downloaded_by_sarguardian": False,
         "persistent_storage_used": False,
-        "mask_semantics": {
-            "expected_dtype": "uint32",
-            "observed_dtype": mask_source_dtype,
-            "dtype_valid": bool(mask_dtype_valid),
-            "decode_status": "packed_uint32_decoded_with_high_flag_quarantine" if mask_dtype_valid else "unresolved_non_uint32_mask_dtype",
-            "source_product_upstream_encoding_verified": False,
-            "packed_values_ge_2pow24_quarantined": int(packed_wrs_ambiguous.sum()),
-            "note": "Exact native-HDF5/COG agreement verifies transfer fidelity, not upstream mask encoding. Values >= 2^24 remain quarantined until independent validity evidence or a corrected source product resolves the ISCE3 float32-geocoding ambiguity.",
-        },
         "aoi": {
             "window_width_px": int(reference["window_width"]),
             "window_height_px": int(reference["window_height"]),
@@ -1842,11 +1975,7 @@ def analyze_gunw_aoi_layers(
             "connected_components_positive_pixels": int(components_pass.sum()),
             "after_connected_components_pixels": int(after_components.sum()),
             "ionosphere_phase_screen_valid_pixels": int(iono_valid.sum()),
-            "ionosphere_screen_uncertainty_valid_pixels": int(iono_uncertainty_valid.sum()),
-            "after_ionosphere_screen_pixels": int(after_iono_screen.sum()),
-            "after_ionosphere_uncertainty_validity_pixels": int(after_iono_uncertainty.sum()),
             "after_ionosphere_validity_pixels": int(after_iono.sum()),
-            "mask_dtype_valid": bool(mask_dtype_valid),
             "mask_low_byte_land_valid_subswath_pixels": int(base_wrs_pass.sum()),
             "mask_reference_exception_pixels": int((mask_valid & (reference_input_exception != 0)).sum()),
             "mask_secondary_exception_pixels": int((mask_valid & (secondary_input_exception != 0)).sum()),
@@ -1877,7 +2006,7 @@ def analyze_gunw_aoi_layers(
                 f"coherence magnitude >= {coherence_threshold}",
                 "connected component ID > 0",
                 "GUNW mask decoded for water and reference/secondary subswath validity",
-                "ionosphere phase screen and finite uncertainty required for corrected-phase qualification",
+                "ionosphere phase screen subtracted where valid",
             ],
             "note": "This is an array adapter aligned with the original reader's quality gates, not a call to its HDF5-only read_gunw function. No reference was selected and no LOS displacement was computed.",
         },

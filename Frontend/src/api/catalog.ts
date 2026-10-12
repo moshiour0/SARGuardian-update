@@ -147,15 +147,6 @@ export type HarmonyJobStatusResponse = {
 
 export type GunwQualityAnalysisResponse = {
   service: string;
-  mask_semantics?: {
-    expected_dtype: string;
-    observed_dtype: string;
-    dtype_valid: boolean;
-    decode_status: string;
-    source_product_upstream_encoding_verified: boolean;
-    packed_values_ge_2pow24_quarantined: number;
-    note: string;
-  };
   mode: string;
   granule_name: string;
   polarization: string;
@@ -215,11 +206,7 @@ export type GunwQualityAnalysisResponse = {
     connected_components_positive_pixels: number;
     after_connected_components_pixels?: number;
     ionosphere_phase_screen_valid_pixels: number;
-    ionosphere_screen_uncertainty_valid_pixels?: number;
-    after_ionosphere_screen_pixels?: number;
-    after_ionosphere_uncertainty_validity_pixels?: number;
     after_ionosphere_validity_pixels?: number;
-    mask_dtype_valid?: boolean;
     mask_valid_land_subswath_pixels: number;
     after_land_and_subswath_mask_pixels?: number;
     mask_low_byte_land_valid_subswath_pixels?: number;
@@ -270,8 +257,38 @@ export type NativeSourceMaskVerificationResponse = {
     bits_25_to_31_nonzero_pixels?: number;
     full_values?: Array<{ value: number; count: number }>;
   };
+  source_processing_metadata?: Record<string, { path?: string; value?: unknown }>;
+  native_valid_data_mask_diagnostics?: {
+    status?: string;
+    polarization?: string;
+    search_root?: string;
+    dataset_path?: string | null;
+    dtype?: string;
+    shape?: number[];
+    source_mask_shape?: number[];
+    fill_value?: unknown;
+    encoding?: string;
+    grid_relation?: string;
+    aoi_polygon_pixels?: number;
+    samples_checked?: number;
+    well_formed_samples?: number;
+    reserved_bit_or_unknown_samples?: number;
+    reference_valid_pixels?: number;
+    secondary_valid_pixels?: number;
+    both_reference_and_secondary_valid_pixels?: number;
+    neither_reference_nor_secondary_valid_pixels?: number;
+    valid_data_mask_value_counts?: Array<{ value: number; count: number }>;
+    wrs_reference_digit_zero_pixels?: number;
+    wrs_secondary_digit_zero_pixels?: number;
+    wrs_reference_zero_but_validmask_reference_valid_pixels?: number;
+    wrs_secondary_zero_but_validmask_secondary_valid_pixels?: number;
+    wrs_reference_nonzero_but_validmask_reference_invalid_pixels?: number;
+    wrs_secondary_nonzero_but_validmask_secondary_invalid_pixels?: number;
+    message?: string;
+  };
   related_mask_qa_objects?: Array<{
     path: string; object_type: string; dtype?: string; shape?: number[];
+    dataset_value?: unknown;
     metadata?: { attribute_names?: string[]; selected_attributes?: Record<string, unknown> };
   }>;
   native_x_coordinates_path?: string;
