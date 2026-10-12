@@ -548,6 +548,7 @@ function AoiWindowPanel({
   qualityAnalysis,
   sourceMaskJobId,
   onSourceMaskJobIdChange,
+  sourceMaskJobOptions,
   sourceMaskVerification,
   sourceMaskVerificationLoading,
   sourceMaskVerificationError,
@@ -578,6 +579,7 @@ function AoiWindowPanel({
   qualityAnalysis: GunwQualityAnalysisResponse | null;
   sourceMaskJobId: string;
   onSourceMaskJobIdChange: (value: string) => void;
+  sourceMaskJobOptions: SubmittedHarmonyLayerJob[];
   sourceMaskVerification: NativeSourceMaskVerificationResponse | null;
   sourceMaskVerificationLoading: boolean;
   sourceMaskVerificationError: string;
@@ -590,6 +592,12 @@ function AoiWindowPanel({
   const activeQualityJobs = qualityBundle?.jobs || individualLayerJobs;
   const qualityRolesToCheck = [...requiredQualityRoles, ...(activeQualityJobs.ionosphere_phase_screen_uncertainty ? ['ionosphere_phase_screen_uncertainty'] : [])];
   const hasAllRequiredQualityJobs = requiredQualityRoles.every((role) => Boolean(activeQualityJobs[role]?.job_id));
+  const successfulStatuses = ['successful', 'completed', 'complete'];
+  const selectedSourceMaskJob = sourceMaskJobOptions.find((job) => job.job_id === sourceMaskJobId);
+  const sourceMaskJobIsValid = Boolean(selectedSourceMaskJob
+    && selectedSourceMaskJob.layer_role === 'mask'
+    && successfulStatuses.includes(selectedSourceMaskJob.status.toLowerCase())
+    && selectedSourceMaskJob.granule_name === granuleName.trim());
   const canAnalyzeQuality = hasAllRequiredQualityJobs
     && qualityRolesToCheck.every((role) => ['successful', 'completed', 'complete'].includes(String(qualityStatuses[role] || activeQualityJobs[role]?.status || '').toLowerCase()));
   return (
@@ -786,16 +794,24 @@ function AoiWindowPanel({
           <strong>Verify original NISAR source mask</strong>
           <p className="catalog-notice">Compare the native integer mask inside the original HDF5 product against the matching Harmony COG pixels using authenticated remote range reads. The full HDF5 file is not intentionally downloaded or saved. This does not relax any quality gate.</p>
           <label className="aoi-job-label">
-            <span>Successful Harmony mask Job ID</span>
-            <input
-              value={sourceMaskJobId}
+            <span>Successful GUNW quality mask job for this product</span>
+            <select
+              value={sourceMaskJobOptions.some((job) => job.job_id === sourceMaskJobId) ? sourceMaskJobId : ''}
               onChange={(event) => onSourceMaskJobIdChange(event.target.value)}
-              placeholder="Paste the successful mask layer job ID"
-              autoComplete="off"
-              spellCheck={false}
-            />
+            >
+              <option value="">{sourceMaskJobOptions.length ? 'Select a GUNW quality mask job…' : 'Submit a mask job for this selected product first'}</option>
+              {sourceMaskJobOptions.map((job) => {
+                const isSuccessful = successfulStatuses.includes(job.status.toLowerCase());
+                return (
+                  <option key={job.job_id} value={job.job_id} disabled={!isSuccessful}>
+                    {isSuccessful ? 'Successful' : job.status} · {job.job_id} · {new Date(job.submitted_at).toLocaleString()}
+                  </option>
+                );
+              })}
+            </select>
           </label>
-          <button type="button" className="investigate-button quality-action-button" disabled={!areaClosed || coordinates.length < 3 || !granuleName.trim() || !sourceMaskJobId.trim() || sourceMaskVerificationLoading} onClick={onVerifySourceMask}>
+          <p className="action-hint">Only the GUNW quality mask job is accepted here. Do not use an unwrapped-phase, coherence, or connected-components Job ID. Those layers have their own roles in the multi-layer quality analysis.</p>
+          <button type="button" className="investigate-button quality-action-button" disabled={!areaClosed || coordinates.length < 3 || !granuleName.trim() || !sourceMaskJobIsValid || sourceMaskVerificationLoading} onClick={onVerifySourceMask}>
             {sourceMaskVerificationLoading ? 'Reading source mask window…' : 'Verify native source mask'}
           </button>
           {sourceMaskVerificationError && <p className="catalog-error" role="alert">{sourceMaskVerificationError}</p>}
@@ -964,6 +980,13 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     }
   }
   const individualLayersAvailable = Object.keys(individualLayerJobs).length > 0;
+  const sourceMaskJobOptions = submittedHarmonyJobs.filter((job) =>
+    job.layer_role === 'mask'
+    && job.granule_name === qualityGranuleName.trim()
+    && job.maturity === harmonyWorkflowMaturity
+    && job.polarization === harmonyWorkflowPolarization
+    && !['failed', 'error', 'canceled', 'cancelled'].includes(job.status.toLowerCase())
+  );
 
   useEffect(() => {
     try {
@@ -1543,7 +1566,22 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
       return;
     }
     if (!qualityGranuleName.trim() || !sourceMaskJobId.trim()) {
-      setSourceMaskVerificationError('Enter the exact GUNW granule name and successful mask job ID.');
+      setSourceMaskVerificationError('Select a successful GUNW quality mask job for the selected granule.');
+      return;
+    }
+    const selectedMaskJob = submittedHarmonyJobs.find((job) => job.job_id === sourceMaskJobId);
+    if (!selectedMaskJob || selectedMaskJob.layer_role !== 'mask') {
+      setSourceMaskVerificationError('Wrong Job ID type: this check accepts only a GUNW quality mask job. A connected-components Job ID cannot be used here. Select the mask job from the list.');
+      return;
+    }
+    if (selectedMaskJob.granule_name !== qualityGranuleName.trim()
+      || selectedMaskJob.maturity !== harmonyWorkflowMaturity
+      || selectedMaskJob.polarization !== harmonyWorkflowPolarization) {
+      setSourceMaskVerificationError('The selected mask job does not match the current granule, maturity and polarization. Use the matching mask job card to select it.');
+      return;
+    }
+    if (!['successful', 'completed', 'complete'].includes(selectedMaskJob.status.toLowerCase())) {
+      setSourceMaskVerificationError('The mask job must be successful before source verification. Refresh its status first.');
       return;
     }
     setSourceMaskVerificationError('');
@@ -1777,6 +1815,7 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                   qualityAnalysis={qualityAnalysis}
                   sourceMaskJobId={sourceMaskJobId}
                   onSourceMaskJobIdChange={(value) => { setSourceMaskJobId(value); setSourceMaskVerification(null); setSourceMaskVerificationError(''); }}
+                  sourceMaskJobOptions={sourceMaskJobOptions}
                   sourceMaskVerification={sourceMaskVerification}
                   sourceMaskVerificationLoading={isSourceMaskVerifying}
                   sourceMaskVerificationError={sourceMaskVerificationError}
