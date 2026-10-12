@@ -126,6 +126,50 @@ export type HarmonyQualityLayerJob = {
   reused_existing_job?: boolean;
 };
 
+export type HarmonyLayerRole =
+  | 'unwrapped_phase'
+  | 'coherence'
+  | 'connected_components'
+  | 'ionosphere_phase_screen'
+  | 'ionosphere_phase_screen_uncertainty'
+  | 'mask';
+
+export type HarmonySingleLayerSubmissionResponse = {
+  service: string;
+  mode: string;
+  harmony_http_status: number;
+  job_id: string;
+  job_status_url: string;
+  granule_name: string;
+  layer_role: HarmonyLayerRole;
+  variable: string;
+  polarization: 'HH' | 'VV';
+  maturity?: 'PROVISIONAL' | 'BETA';
+  collection_maturity?: 'PROVISIONAL' | 'BETA';
+  production?: 'PR' | 'UR';
+  product_type?: 'GUNW';
+  output_format: string;
+  input_granules_limit: number;
+  variables_requested: number;
+  full_granule_layer: boolean;
+  aoi_subset_requested: boolean;
+  data_downloaded_by_sarguardian: boolean;
+  scientific_analysis_performed: boolean;
+  message: string;
+};
+
+export type SubmittedHarmonyLayerJob = {
+  job_id: string;
+  granule_name: string;
+  layer_role: HarmonyLayerRole;
+  polarization: 'HH' | 'VV';
+  maturity: 'PROVISIONAL' | 'BETA';
+  variable: string;
+  status: string;
+  submitted_at: string;
+  status_error?: string;
+};
+
 export type HarmonyQualityLayerBundle = {
   service: string;
   mode: string;
@@ -356,6 +400,36 @@ async function readApiPayload<T>(response: Response, fallback: string): Promise<
     throw new Error(payload.detail || payload.message || `${fallback} (${response.status}).`);
   }
   return payload as T;
+}
+
+export async function startNisarHarmonyLayerJob(input: {
+  granuleName: string;
+  layerRole: HarmonyLayerRole;
+  coordinates: Coordinate[];
+  maturity?: 'PROVISIONAL' | 'BETA';
+  polarization?: 'HH' | 'VV';
+}): Promise<HarmonySingleLayerSubmissionResponse> {
+  const granuleName = input.granuleName.trim();
+  if (!/^NISAR_L2_(PR|UR)_GUNW_[A-Za-z0-9_]+$/.test(granuleName)) {
+    throw new Error('Select an exact PR/UR GUNW granule from the ASF catalogue. GOFF and other products are not enabled for this extraction workflow yet.');
+  }
+  if (input.coordinates.length < 3) {
+    throw new Error('Close the area polygon before submitting a Harmony job.');
+  }
+  const response = await fetch(`${API_BASE}/api/harmony/extract/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      granule_name: granuleName,
+      coordinates: input.coordinates,
+      product_type: 'GUNW',
+      maturity: input.maturity ?? 'PROVISIONAL',
+      polarization: input.polarization ?? 'HH',
+      layer_role: input.layerRole,
+      confirm_full_granule_layer: true,
+    }),
+  });
+  return readApiPayload<HarmonySingleLayerSubmissionResponse>(response, 'Could not submit the selected layer to NASA Harmony');
 }
 
 export async function startGunwQualityLayers(input: {

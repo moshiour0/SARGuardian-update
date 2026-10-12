@@ -221,3 +221,68 @@ def test_gunw_quality_analyze_endpoint_passes_job_ids_and_aoi(monkeypatch):
     assert body["physical_displacement"]["computed"] is False
     assert captured["job_ids"]["unwrapped_phase"] == "phase-job-123456"
     assert captured["job_ids"]["ionosphere_phase_screen_uncertainty"] == "uncertainty-123456"
+
+
+def test_frontend_single_layer_submission_returns_workflow_metadata(monkeypatch):
+    captured = {}
+
+    def fake_submit_single_layer_job(**kwargs):
+        captured.update(kwargs)
+        return {
+            "service": "NASA Harmony single-layer extraction",
+            "mode": "job-submitted",
+            "harmony_http_status": 202,
+            "job_id": "test-job-12345678",
+            "job_status_url": "https://harmony.earthdata.nasa.gov/jobs/test-job-12345678",
+            "granule_name": kwargs["granule_name"],
+            "layer_role": kwargs["layer_role"],
+            "variable": "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/mask",
+            "polarization": kwargs["polarization"],
+            "output_format": "image/tiff",
+            "input_granules_limit": 1,
+            "variables_requested": 1,
+            "full_granule_layer": True,
+            "aoi_subset_requested": False,
+            "data_downloaded_by_sarguardian": False,
+            "scientific_analysis_performed": False,
+            "message": "Harmony job submitted.",
+        }
+
+    monkeypatch.setattr(main, "submit_single_layer_job", fake_submit_single_layer_job)
+    response = client.post(
+        "/api/harmony/extract/start",
+        json={
+            "granule_name": "NISAR_L2_PR_GUNW_027_149_D_074_028_2000_SH_20260811T130632_130706_P05023_N_F_J_001",
+            "coordinates": square(),
+            "product_type": "GUNW",
+            "maturity": "BETA",
+            "polarization": "VV",
+            "layer_role": "mask",
+            "confirm_full_granule_layer": True,
+        },
+        headers={"x-forwarded-for": "test-single-layer-workflow"},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["job_id"] == "test-job-12345678"
+    assert body["product_type"] == "GUNW"
+    assert body["collection_maturity"] == "BETA"
+    assert body["production"] == "PR"
+    assert body["polarization"] == "VV"
+    assert body["scientific_analysis_performed"] is False
+    assert captured["layer_role"] == "mask"
+
+
+def test_single_layer_submission_limit(monkeypatch):
+    monkeypatch.setattr(main, "SINGLE_LAYER_STARTS_PER_HOUR", 1)
+    main._single_layer_start_times.clear()
+    main._check_single_layer_start_limit("test-single-layer-limit")
+    try:
+        main._check_single_layer_start_limit("test-single-layer-limit")
+    except main.HTTPException as error:
+        assert error.status_code == 429
+        assert "limit reached" in str(error.detail)
+    else:
+        raise AssertionError("Expected the second submission to be rate limited")
+    finally:
+        main._single_layer_start_times.pop("test-single-layer-limit", None)

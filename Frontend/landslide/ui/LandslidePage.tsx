@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
 import type { User } from 'firebase/auth';
-import { analyzeGunwAoiQuality, getNisarHarmonyJobStatus, inspectNisarAoiWindow, searchNisarCatalog, startGunwQualityLayers, verifyGunwNativeSourceMask } from '../../src/api/catalog';
-import type { AoiWindowResponse, CatalogResponse, GunwQualityAnalysisResponse, HarmonyQualityLayerBundle, NativeSourceMaskVerificationResponse, NisarProductType } from '../../src/api/catalog';
+import { analyzeGunwAoiQuality, getNisarHarmonyJobStatus, inspectNisarAoiWindow, searchNisarCatalog, startGunwQualityLayers, startNisarHarmonyLayerJob, verifyGunwNativeSourceMask } from '../../src/api/catalog';
+import type { AoiWindowResponse, CatalogProduct, CatalogResponse, GunwQualityAnalysisResponse, HarmonyLayerRole, HarmonyQualityLayerBundle, HarmonyQualityLayerJob, NativeSourceMaskVerificationResponse, NisarProductType, SubmittedHarmonyLayerJob } from '../../src/api/catalog';
 import { investigate } from '../engine/adapter';
 import { calculateGeodesicAreaKm2, timestampToRequest, validateAnalysisRequest, validatePolyline } from '../engine/validation';
 import type { AnalysisRequest, Coordinate, InvestigationPolyline, InvestigationResult, LocationSelection, TimestampSelection } from '../engine/types';
@@ -323,7 +323,17 @@ function formatGib(value: number): string {
   return `${(value * 1024).toFixed(0)} MiB`;
 }
 
-function CatalogPreflightPanel({ result, onClose }: { result: CatalogResponse; onClose: () => void }) {
+function CatalogPreflightPanel({
+  result,
+  onClose,
+  onSelectProduct,
+  selectedGranuleName,
+}: {
+  result: CatalogResponse;
+  onClose: () => void;
+  onSelectProduct: (product: CatalogProduct) => void;
+  selectedGranuleName: string;
+}) {
   return (
     <div className="catalog-preflight" aria-live="polite">
       <div className="catalog-preflight-heading">
@@ -345,16 +355,25 @@ function CatalogPreflightPanel({ result, onClose }: { result: CatalogResponse; o
         <p className="catalog-empty">No matching products were returned for this area, time range and product family. Try another date range or switch between GUNW and GOFF.</p>
       ) : (
         <div className="catalog-product-list">
-          {result.products.slice(0, 12).map((product, index) => (
-            <div className="catalog-product-row" key={`${product.granule_name}-${index}`}>
-              <div className="catalog-product-main">
-                <strong title={product.granule_name}>{product.granule_name}</strong>
-                <small>{product.observation_dates.join(' → ') || product.start_time || 'Acquisition date not parsed'} · {product.direction || 'Direction unknown'}{product.path ? ` · path ${product.path}` : ''}</small>
+          {result.products.map((product, index) => {
+            const isExtractableGunw = result.query.product_type === 'GUNW'
+              && /^NISAR_L2_(PR|UR)_GUNW_[A-Za-z0-9_]+$/.test(product.granule_name);
+            const isSelected = selectedGranuleName === product.granule_name;
+            return (
+              <div className={`catalog-product-row${isSelected ? ' is-selected' : ''}`} key={`${product.granule_name}-${index}`}>
+                <div className="catalog-product-main">
+                  <strong title={product.granule_name}>{product.granule_name}</strong>
+                  <small>{product.observation_dates.join(' → ') || product.start_time || 'Acquisition date not parsed'} · {product.direction || 'Direction unknown'}{product.path ? ` · path ${product.path}` : ''}</small>
+                </div>
+                <div className="catalog-product-actions">
+                  <span>{product.size_mb == null ? 'Size n/a' : formatGib(product.size_mb / 1024)}</span>
+                  <button type="button" className="catalog-select-product" disabled={!isExtractableGunw} onClick={() => onSelectProduct(product)}>
+                    {isSelected ? 'Selected' : isExtractableGunw ? 'Select product' : 'GUNW only'}
+                  </button>
+                </div>
               </div>
-              <span>{product.size_mb == null ? 'Size n/a' : formatGib(product.size_mb / 1024)}</span>
-            </div>
-          ))}
-          {result.products.length > 12 && <p className="catalog-empty">Showing the first 12 of {result.products.length} returned granules.</p>}
+            );
+          })}
         </div>
       )}
       <details className="catalog-disclaimers">
@@ -362,6 +381,147 @@ function CatalogPreflightPanel({ result, onClose }: { result: CatalogResponse; o
         {result.warnings.map((warning) => <p key={warning}>{warning}</p>)}
       </details>
     </div>
+  );
+}
+
+const HARMONY_LAYER_OPTIONS: Array<{ value: HarmonyLayerRole; label: string }> = [
+  { value: 'unwrapped_phase', label: 'Unwrapped phase · starting layer' },
+  { value: 'coherence', label: 'Coherence magnitude' },
+  { value: 'connected_components', label: 'Connected components' },
+  { value: 'ionosphere_phase_screen', label: 'Ionosphere phase screen' },
+  { value: 'ionosphere_phase_screen_uncertainty', label: 'Ionosphere phase-screen uncertainty' },
+  { value: 'mask', label: 'GUNW quality mask' },
+];
+
+function HarmonyJobSubmissionPanel({
+  product,
+  areaClosed,
+  coordinatesCount,
+  layerRole,
+  onLayerRoleChange,
+  maturity,
+  onMaturityChange,
+  polarization,
+  onPolarizationChange,
+  confirmFullGranule,
+  onConfirmFullGranuleChange,
+  isSubmitting,
+  error,
+  message,
+  jobs,
+  checkingJobs,
+  onSubmit,
+  onCheckJob,
+  onCheckMatchingJobs,
+  onUseAsPhase,
+  onUseAsMask,
+}: {
+  product: CatalogProduct | null;
+  areaClosed: boolean;
+  coordinatesCount: number;
+  layerRole: HarmonyLayerRole;
+  onLayerRoleChange: (value: HarmonyLayerRole) => void;
+  maturity: 'PROVISIONAL' | 'BETA';
+  onMaturityChange: (value: 'PROVISIONAL' | 'BETA') => void;
+  polarization: 'HH' | 'VV';
+  onPolarizationChange: (value: 'HH' | 'VV') => void;
+  confirmFullGranule: boolean;
+  onConfirmFullGranuleChange: (value: boolean) => void;
+  isSubmitting: boolean;
+  error: string;
+  message: string;
+  jobs: SubmittedHarmonyLayerJob[];
+  checkingJobs: boolean;
+  onSubmit: () => void;
+  onCheckJob: (jobId: string) => void;
+  onCheckMatchingJobs: () => void;
+  onUseAsPhase: (job: SubmittedHarmonyLayerJob) => void;
+  onUseAsMask: (job: SubmittedHarmonyLayerJob) => void;
+}) {
+  const extractable = Boolean(product && /^NISAR_L2_(PR|UR)_GUNW_[A-Za-z0-9_]+$/.test(product.granule_name));
+  const matchingJobs = product ? jobs.filter((job) => job.granule_name === product.granule_name && job.maturity === maturity && job.polarization === polarization) : [];
+  return (
+    <section className="harmony-submit-panel" aria-live="polite">
+      <div className="catalog-preflight-heading">
+        <div>
+          <span className="result-kicker">NASA HARMONY · DIRECT JOB SUBMISSION</span>
+          <h3>Select a product, submit a layer, receive its Job ID</h3>
+        </div>
+      </div>
+      <p className="catalog-notice">Select a GUNW product in the archive list above. The backend checks the live Harmony collection/layer capability, submits one granule and one variable, then returns the job ID here. AOI cropping happens later; it is not sent as an extraction subset.</p>
+      {!product ? (
+        <p className="catalog-empty">No product selected yet. Press <b>Select product</b> on a GUNW catalogue result to begin.</p>
+      ) : (
+        <>
+          <div className="selected-harmony-product">
+            <small>SELECTED ASF GRANULE</small>
+            <strong title={product.granule_name}>{product.granule_name}</strong>
+            <span>{product.observation_dates.join(' → ') || product.start_time || 'Observation date unavailable'} · {product.direction || 'Direction unknown'}</span>
+          </div>
+          {!extractable && <p className="catalog-warning">This product name is not a supported PR/UR GUNW granule. Current Harmony extraction pilot does not submit GOFF jobs.</p>}
+          <div className="harmony-workflow-fields">
+            <label className="aoi-job-label">
+              <span>Layer to submit</span>
+              <select value={layerRole} onChange={(event) => onLayerRoleChange(event.target.value as HarmonyLayerRole)}>
+                {HARMONY_LAYER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
+            <label className="aoi-job-label">
+              <span>Collection maturity</span>
+              <select value={maturity} onChange={(event) => onMaturityChange(event.target.value as 'PROVISIONAL' | 'BETA')}>
+                <option value="PROVISIONAL">PROVISIONAL</option>
+                <option value="BETA">BETA</option>
+              </select>
+            </label>
+            <label className="aoi-job-label">
+              <span>Polarization</span>
+              <select value={polarization} onChange={(event) => onPolarizationChange(event.target.value as 'HH' | 'VV')}>
+                <option value="HH">HH</option>
+                <option value="VV">VV</option>
+              </select>
+            </label>
+          </div>
+          <label className="harmony-full-granule-confirm">
+            <input type="checkbox" checked={confirmFullGranule} onChange={(event) => onConfirmFullGranuleChange(event.target.checked)} />
+            <span>I understand this queues one variable for the <b>full granule</b>. The selected polygon is used later for AOI diagnostics, not as a Harmony subset.</span>
+          </label>
+          <button type="button" className="investigate-button harmony-submit-button" disabled={!extractable || !areaClosed || coordinatesCount < 3 || !confirmFullGranule || isSubmitting} onClick={onSubmit}>
+            {isSubmitting ? 'Checking capability & submitting…' : `Submit ${HARMONY_LAYER_OPTIONS.find((item) => item.value === layerRole)?.label || 'layer'} job`}
+          </button>
+          {!areaClosed && <p className="action-hint">Close the AOI polygon before submitting, so the workflow carries the correct area into the follow-up analysis.</p>}
+        </>
+      )}
+      {error && <p className="catalog-error" role="alert">{error}</p>}
+      {message && <p className="action-hint" role="status">{message}</p>}
+      {jobs.length > 0 && (
+        <div className="submitted-harmony-jobs">
+          <div className="submitted-harmony-jobs-heading">
+            <strong>Jobs submitted from this website ({jobs.length})</strong>
+            <button type="button" className="demo-button quality-action-button" disabled={!matchingJobs.length || checkingJobs} onClick={onCheckMatchingJobs}>
+              {checkingJobs ? 'Checking…' : 'Check selected product jobs'}
+            </button>
+          </div>
+          {jobs.map((job) => (
+            <div className="submitted-harmony-job" key={job.job_id}>
+              <div className="submitted-harmony-job-top">
+                <strong>{HARMONY_LAYER_OPTIONS.find((item) => item.value === job.layer_role)?.label || job.layer_role.replace(/_/g, ' ')}</strong>
+                <span className={`harmony-job-status ${['successful', 'completed', 'complete'].includes(job.status.toLowerCase()) ? 'is-success' : ['failed', 'error', 'canceled', 'cancelled'].includes(job.status.toLowerCase()) ? 'is-error' : ''}`}>{job.status}</span>
+              </div>
+              <small title={job.granule_name}>{job.granule_name}</small>
+              <code>{job.job_id}</code>
+              {job.status_error && <small className="catalog-error">{job.status_error}</small>}
+              <div className="submitted-harmony-job-actions">
+                <span>{job.maturity} · {job.polarization} · {new Date(job.submitted_at).toLocaleString()}</span>
+                <button type="button" className="demo-button" disabled={checkingJobs} onClick={() => onCheckJob(job.job_id)}>Refresh status</button>
+                {job.layer_role === 'unwrapped_phase' && <button type="button" className="demo-button" disabled={!['successful', 'completed', 'complete'].includes(job.status.toLowerCase())} onClick={() => onUseAsPhase(job)}>Use as phase ID</button>}
+                {job.layer_role === 'mask' && <button type="button" className="demo-button" disabled={!['successful', 'completed', 'complete'].includes(job.status.toLowerCase())} onClick={() => onUseAsMask(job)}>Use as mask ID</button>}
+              </div>
+            </div>
+          ))}
+          <p className="catalog-notice">Job IDs remain in this browser tab if you refresh it. Do not submit the same layer repeatedly without checking the existing job status first.</p>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -378,6 +538,8 @@ function AoiWindowPanel({
   onGranuleNameChange,
   qualityBundle,
   qualityStatuses,
+  individualLayerJobs,
+  individualLayersAvailable,
   qualityMessage,
   qualityError,
   qualityStartLoading,
@@ -406,6 +568,8 @@ function AoiWindowPanel({
   onGranuleNameChange: (value: string) => void;
   qualityBundle: HarmonyQualityLayerBundle | null;
   qualityStatuses: Record<string, string>;
+  individualLayerJobs: Record<string, HarmonyQualityLayerJob>;
+  individualLayersAvailable: boolean;
   qualityMessage: string;
   qualityError: string;
   qualityStartLoading: boolean;
@@ -423,9 +587,11 @@ function AoiWindowPanel({
   onAnalyzeQuality: () => void;
 }) {
   const requiredQualityRoles = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
-  const qualityRolesToCheck = [...requiredQualityRoles, ...(qualityBundle?.jobs.ionosphere_phase_screen_uncertainty ? ['ionosphere_phase_screen_uncertainty'] : [])];
-  const canAnalyzeQuality = Boolean(qualityBundle?.all_required_layers_submitted)
-    && qualityRolesToCheck.every((role) => ['successful', 'completed', 'complete'].includes((qualityStatuses[role] || qualityBundle?.jobs[role]?.status) || ''));
+  const activeQualityJobs = qualityBundle?.jobs || individualLayerJobs;
+  const qualityRolesToCheck = [...requiredQualityRoles, ...(activeQualityJobs.ionosphere_phase_screen_uncertainty ? ['ionosphere_phase_screen_uncertainty'] : [])];
+  const hasAllRequiredQualityJobs = requiredQualityRoles.every((role) => Boolean(activeQualityJobs[role]?.job_id));
+  const canAnalyzeQuality = hasAllRequiredQualityJobs
+    && qualityRolesToCheck.every((role) => ['successful', 'completed', 'complete'].includes(String(qualityStatuses[role] || activeQualityJobs[role]?.status || '').toLowerCase()));
   return (
     <div className="aoi-window-panel" aria-live="polite">
       <div className="catalog-preflight-heading">
@@ -471,7 +637,7 @@ function AoiWindowPanel({
       )}
       <div className="quality-layer-section">
         <span className="result-kicker">NEXT · MULTI-LAYER QUALITY CHECK</span>
-        <p className="catalog-notice">Reuse the completed phase job and request matching coherence, connected-components, ionosphere-screen, and GUNW mask layers. Harmony stages full-granule layer outputs; SARGuardian reads only the selected AOI window and does not save TIFF files.</p>
+        <p className="catalog-notice">You can submit each matching layer one by one in the submission panel above, or submit the remaining companion layers as a batch here. Do not mix both approaches for the same product/settings: that can create duplicate full-granule jobs.</p>
         <label className="aoi-job-label">
           <span>Exact granule name for this phase job</span>
           <input
@@ -482,30 +648,32 @@ function AoiWindowPanel({
             spellCheck={false}
           />
         </label>
-        <button className="investigate-button aoi-window-button" type="button" disabled={!areaClosed || coordinates.length < 3 || !jobId.trim() || !granuleName.trim() || qualityStartLoading} onClick={onStartQualityLayers}>
-          {qualityStartLoading ? 'Submitting quality layers…' : 'Start companion quality-layer jobs'}
+        <button className="investigate-button aoi-window-button" type="button" disabled={!areaClosed || coordinates.length < 3 || !jobId.trim() || !granuleName.trim() || qualityStartLoading || Boolean(qualityBundle)} onClick={onStartQualityLayers}>
+          {qualityStartLoading ? 'Submitting quality layers…' : qualityBundle ? 'Companion jobs submitted — check status below' : 'Submit remaining companion layers (batch)'}
         </button>
         {qualityError && <p className="catalog-error" role="alert">{qualityError}</p>}
         {qualityMessage && <p className="action-hint" role="status">{qualityMessage}</p>}
-        {qualityBundle && (
+        {(qualityBundle || individualLayersAvailable) && (
           <div className="quality-job-list">
-            <strong>Harmony layer jobs</strong>
-            {Object.entries(qualityBundle.jobs).map(([role, job]) => (
+            <strong>{qualityBundle ? 'Harmony companion-layer jobs' : 'Individually submitted Harmony layer jobs'}</strong>
+            {Object.entries(activeQualityJobs).map(([role, job]) => (
               <div className="quality-job-row" key={role}>
                 <span>{role.replace(/_/g, ' ')}</span>
                 <code>{job.job_id}</code>
                 <b>{qualityStatuses[role] || job.status}</b>
               </div>
             ))}
-            {Object.entries(qualityBundle.submission_errors || {}).map(([role, message]) => (
+            {Object.entries(qualityBundle?.submission_errors || {}).map(([role, message]) => (
               <p className="catalog-warning" key={role}>{role}: {message}</p>
             ))}
+            {!qualityBundle && <p className="catalog-notice">These job IDs were submitted one layer at a time. Only jobs matching the currently selected granule, maturity, and polarization are included.</p>}
             <button type="button" className="demo-button quality-action-button" disabled={qualityCheckLoading} onClick={onCheckQualityLayers}>
               {qualityCheckLoading ? 'Checking jobs…' : 'Check all layer jobs'}
             </button>
             <button type="button" className="investigate-button quality-action-button" disabled={!canAnalyzeQuality || qualityAnalyzeLoading} onClick={onAnalyzeQuality}>
               {qualityAnalyzeLoading ? 'Analyzing AOI quality…' : 'Analyze aligned AOI quality gates'}
             </button>
+            {!canAnalyzeQuality && <p className="action-hint">Submit the missing layers and check their statuses. Analysis is enabled only when every required layer job is present and successful.</p>}
           </div>
         )}
         {qualityAnalysis?.quality_gates && (
@@ -712,6 +880,26 @@ function AoiWindowPanel({
   );
 }
 
+const SUBMITTED_HARMONY_JOBS_STORAGE_KEY = 'sarguardian.submittedHarmonyLayerJobs.v1';
+
+function loadSubmittedHarmonyJobs(): SubmittedHarmonyLayerJob[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.sessionStorage.getItem(SUBMITTED_HARMONY_JOBS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as unknown : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is SubmittedHarmonyLayerJob => Boolean(
+      item && typeof item === 'object'
+      && typeof (item as SubmittedHarmonyLayerJob).job_id === 'string'
+      && typeof (item as SubmittedHarmonyLayerJob).granule_name === 'string'
+      && typeof (item as SubmittedHarmonyLayerJob).layer_role === 'string'
+      && typeof (item as SubmittedHarmonyLayerJob).status === 'string'
+    )).slice(0, 40);
+  } catch {
+    return [];
+  }
+}
+
 export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome: () => void; onSignOut: () => void }) {
   const [searchText, setSearchText] = useState('');
   const [location, setLocation] = useState<LocationSelection | null>(null);
@@ -732,6 +920,16 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const [catalogResult, setCatalogResult] = useState<CatalogResponse | null>(null);
   const [isCatalogLoading, setIsCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState('');
+  const [selectedHarmonyProduct, setSelectedHarmonyProduct] = useState<CatalogProduct | null>(null);
+  const [harmonyLayerRole, setHarmonyLayerRole] = useState<HarmonyLayerRole>('unwrapped_phase');
+  const [harmonyWorkflowMaturity, setHarmonyWorkflowMaturity] = useState<'PROVISIONAL' | 'BETA'>('PROVISIONAL');
+  const [harmonyWorkflowPolarization, setHarmonyWorkflowPolarization] = useState<'HH' | 'VV'>('HH');
+  const [confirmFullGranuleLayer, setConfirmFullGranuleLayer] = useState(false);
+  const [isSubmittingHarmonyJob, setIsSubmittingHarmonyJob] = useState(false);
+  const [harmonySubmitError, setHarmonySubmitError] = useState('');
+  const [harmonySubmitMessage, setHarmonySubmitMessage] = useState('');
+  const [submittedHarmonyJobs, setSubmittedHarmonyJobs] = useState<SubmittedHarmonyLayerJob[]>(loadSubmittedHarmonyJobs);
+  const [isCheckingSubmittedJobs, setIsCheckingSubmittedJobs] = useState(false);
   const [harmonyJobId, setHarmonyJobId] = useState('');
   const [aoiWindowResult, setAoiWindowResult] = useState<AoiWindowResponse | null>(null);
   const [isAoiWindowLoading, setIsAoiWindowLoading] = useState(false);
@@ -750,6 +948,30 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const [sourceMaskVerificationError, setSourceMaskVerificationError] = useState('');
   const [sourceMaskVerification, setSourceMaskVerification] = useState<NativeSourceMaskVerificationResponse | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
+  const workflowGranuleName = selectedHarmonyProduct?.granule_name || qualityGranuleName.trim();
+  const individualLayerJobs: Record<string, HarmonyQualityLayerJob> = {};
+  for (const job of submittedHarmonyJobs) {
+    if (job.granule_name !== workflowGranuleName || job.maturity !== harmonyWorkflowMaturity || job.polarization !== harmonyWorkflowPolarization) continue;
+    if (['failed', 'error', 'canceled', 'cancelled'].includes(job.status.toLowerCase())) continue;
+    if (!individualLayerJobs[job.layer_role]) {
+      individualLayerJobs[job.layer_role] = {
+        job_id: job.job_id,
+        status: job.status,
+        variable: job.variable,
+        job_status_url: `https://harmony.earthdata.nasa.gov/jobs/${job.job_id}`,
+        reused_existing_job: false,
+      };
+    }
+  }
+  const individualLayersAvailable = Object.keys(individualLayerJobs).length > 0;
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(SUBMITTED_HARMONY_JOBS_STORAGE_KEY, JSON.stringify(submittedHarmonyJobs.slice(0, 40)));
+    } catch {
+      // Session storage can be disabled in some privacy modes; in-memory job IDs still work.
+    }
+  }, [submittedHarmonyJobs]);
 
   useEffect(() => {
     const handleDocumentPointerDown = (event: MouseEvent) => {
@@ -956,6 +1178,10 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     }
 
     setCatalogError('');
+    setSelectedHarmonyProduct(null);
+    setConfirmFullGranuleLayer(false);
+    setHarmonySubmitError('');
+    setHarmonySubmitMessage('');
     setResult(null);
     setAoiWindowResult(null);
     setAoiWindowError('');
@@ -974,6 +1200,180 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     } finally {
       setIsCatalogLoading(false);
     }
+  };
+
+  const selectHarmonyProduct = (product: CatalogProduct) => {
+    setSelectedHarmonyProduct(product);
+    setQualityGranuleName(product.granule_name);
+    setConfirmFullGranuleLayer(false);
+    setHarmonySubmitError('');
+    setHarmonySubmitMessage('Product selected. Choose a layer and submit it when ready.');
+    setHarmonyJobId('');
+    setAoiWindowResult(null);
+    setAoiWindowError('');
+    setQualityBundle(null);
+    setQualityStatuses({});
+    setQualityAnalysis(null);
+    setQualityError('');
+    setQualityMessage('');
+    setSourceMaskJobId('');
+    setSourceMaskVerification(null);
+    setSourceMaskVerificationError('');
+  };
+
+  const submitSelectedHarmonyLayer = async () => {
+    if (!selectedHarmonyProduct) {
+      setHarmonySubmitError('Select a GUNW product from the catalogue first.');
+      return;
+    }
+    if (!areaClosed || coordinates.length < 3) {
+      setHarmonySubmitError('Close the AOI polygon before submitting a job.');
+      return;
+    }
+    if (!confirmFullGranuleLayer) {
+      setHarmonySubmitError('Confirm the full-granule layer warning before submitting.');
+      return;
+    }
+    const existingJob = submittedHarmonyJobs.find((job) => job.granule_name === selectedHarmonyProduct.granule_name
+      && job.layer_role === harmonyLayerRole && job.maturity === harmonyWorkflowMaturity
+      && job.polarization === harmonyWorkflowPolarization
+      && !['failed', 'error', 'canceled', 'cancelled'].includes(job.status.toLowerCase()));
+    if (existingJob) {
+      setHarmonySubmitError(`A matching ${harmonyLayerRole.replace(/_/g, ' ')} job already exists (${existingJob.job_id}). Refresh or reuse that job rather than submitting a duplicate.`);
+      setHarmonySubmitMessage('No duplicate job was submitted.');
+      return;
+    }
+    setIsSubmittingHarmonyJob(true);
+    setHarmonySubmitError('');
+    setHarmonySubmitMessage('Checking live NASA Harmony capabilities and submitting one layer…');
+    try {
+      const response = await startNisarHarmonyLayerJob({
+        granuleName: selectedHarmonyProduct.granule_name,
+        layerRole: harmonyLayerRole,
+        coordinates: [...coordinates, coordinates[0]],
+        maturity: harmonyWorkflowMaturity,
+        polarization: harmonyWorkflowPolarization,
+      });
+      const record: SubmittedHarmonyLayerJob = {
+        job_id: response.job_id,
+        granule_name: response.granule_name,
+        layer_role: response.layer_role,
+        polarization: harmonyWorkflowPolarization,
+        maturity: harmonyWorkflowMaturity,
+        variable: response.variable,
+        status: 'submitted',
+        submitted_at: new Date().toISOString(),
+      };
+      setSubmittedHarmonyJobs((current) => [record, ...current.filter((job) => job.job_id !== record.job_id)].slice(0, 40));
+      setQualityGranuleName(response.granule_name);
+      if (response.layer_role === 'unwrapped_phase') {
+        setHarmonyJobId(response.job_id);
+        setAoiWindowResult(null);
+        setAoiWindowError('');
+        setQualityBundle(null);
+        setQualityStatuses({});
+        setQualityAnalysis(null);
+        setQualityError('');
+        setQualityMessage('Phase job submitted. Refresh its status and wait for successful completion before reading the AOI or submitting companion jobs.');
+        setSourceMaskJobId('');
+        setSourceMaskVerification(null);
+        setSourceMaskVerificationError('');
+      } else if (response.layer_role === 'mask') {
+        setSourceMaskJobId(response.job_id);
+        setSourceMaskVerification(null);
+        setSourceMaskVerificationError('');
+      }
+      setHarmonySubmitMessage(`Job ID received for ${response.layer_role.replace(/_/g, ' ')}. Check its status below; no raster was downloaded by SARGuardian.`);
+    } catch (error) {
+      setHarmonySubmitError(error instanceof Error ? error.message : 'Could not submit the selected layer to NASA Harmony.');
+      setHarmonySubmitMessage('');
+    } finally {
+      setIsSubmittingHarmonyJob(false);
+    }
+  };
+
+  const checkSubmittedHarmonyJob = async (jobId: string) => {
+    setIsCheckingSubmittedJobs(true);
+    try {
+      const response = await getNisarHarmonyJobStatus(jobId);
+      const status = String(response.job?.status || 'unknown').toLowerCase();
+      setSubmittedHarmonyJobs((current) => current.map((job) => job.job_id === jobId
+        ? { ...job, status, status_error: undefined }
+        : job));
+      setHarmonySubmitMessage(`Harmony job ${jobId}: ${status}${response.job?.progress != null ? ` · ${response.job.progress}%` : ''}.`);
+      setHarmonySubmitError('');
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'Could not check this Harmony job.';
+      setSubmittedHarmonyJobs((current) => current.map((job) => job.job_id === jobId ? { ...job, status_error: detail } : job));
+      setHarmonySubmitError(detail);
+    } finally {
+      setIsCheckingSubmittedJobs(false);
+    }
+  };
+
+  const checkSelectedProductHarmonyJobs = async () => {
+    if (!selectedHarmonyProduct) return;
+    const matchingJobs = submittedHarmonyJobs.filter((job) => job.granule_name === selectedHarmonyProduct.granule_name
+      && job.maturity === harmonyWorkflowMaturity && job.polarization === harmonyWorkflowPolarization);
+    if (!matchingJobs.length) {
+      setHarmonySubmitMessage('No submitted jobs match this product, maturity, and polarization yet.');
+      return;
+    }
+    setIsCheckingSubmittedJobs(true);
+    setHarmonySubmitError('');
+    setHarmonySubmitMessage(`Checking ${matchingJobs.length} selected-product job(s)…`);
+    try {
+      const results = await Promise.all(matchingJobs.map(async (job) => {
+        try {
+          const response = await getNisarHarmonyJobStatus(job.job_id);
+          return { jobId: job.job_id, status: String(response.job?.status || 'unknown').toLowerCase(), error: undefined as string | undefined };
+        } catch (error) {
+          return { jobId: job.job_id, status: job.status, error: error instanceof Error ? error.message : 'Status check failed.' };
+        }
+      }));
+      const byId = new Map(results.map((item) => [item.jobId, item]));
+      setSubmittedHarmonyJobs((current) => current.map((job) => {
+        const result = byId.get(job.job_id);
+        return result ? { ...job, status: result.status, status_error: result.error } : job;
+      }));
+      const complete = results.filter((item) => ['successful', 'completed', 'complete'].includes(item.status)).length;
+      setHarmonySubmitMessage(`Status refresh finished: ${complete} of ${results.length} jobs complete. Wait for every required layer to succeed before quality analysis.`);
+    } finally {
+      setIsCheckingSubmittedJobs(false);
+    }
+  };
+
+  const useSubmittedJobAsPhase = (job: SubmittedHarmonyLayerJob) => {
+    const matchingProduct = catalogResult?.products.find((product) => product.granule_name === job.granule_name);
+    setSelectedHarmonyProduct(matchingProduct || { granule_name: job.granule_name, product_type: 'GUNW', observation_dates: [] });
+    setConfirmFullGranuleLayer(false);
+    setQualityGranuleName(job.granule_name);
+    setHarmonyJobId(job.job_id);
+    setHarmonyWorkflowMaturity(job.maturity);
+    setHarmonyWorkflowPolarization(job.polarization);
+    setQualityBundle(null);
+    setQualityStatuses({});
+    setQualityAnalysis(null);
+    setQualityError('');
+    setSourceMaskJobId('');
+    setSourceMaskVerification(null);
+    setHarmonySubmitMessage('This phase Job ID and its product settings are now selected for the AOI and quality workflow. Check status before continuing.');
+  };
+
+  const useSubmittedJobAsMask = (job: SubmittedHarmonyLayerJob) => {
+    const matchingProduct = catalogResult?.products.find((product) => product.granule_name === job.granule_name);
+    setSelectedHarmonyProduct(matchingProduct || { granule_name: job.granule_name, product_type: 'GUNW', observation_dates: [] });
+    setConfirmFullGranuleLayer(false);
+    setQualityGranuleName(job.granule_name);
+    setSourceMaskJobId(job.job_id);
+    setHarmonyWorkflowMaturity(job.maturity);
+    setHarmonyWorkflowPolarization(job.polarization);
+    setSourceMaskVerification(null);
+    setSourceMaskVerificationError('');
+    setQualityBundle(null);
+    setQualityStatuses({});
+    setQualityAnalysis(null);
+    setHarmonySubmitMessage('This mask Job ID and its product settings are selected for native-source verification. Check status before verifying.');
   };
 
   const runAoiWindowRead = async () => {
@@ -1003,7 +1403,19 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
       return;
     }
     if (!harmonyJobId.trim() || !qualityGranuleName.trim()) {
-      setQualityError('Enter the successful phase Job ID and the exact GUNW granule name used by that job.');
+      setQualityError('Select a successful phase Job ID and the exact GUNW granule name used by that job.');
+      return;
+    }
+    if (qualityBundle) {
+      setQualityError('Companion jobs have already been submitted for this workflow. Refresh their statuses instead of submitting duplicates.');
+      return;
+    }
+    const existingIndividualCompanion = submittedHarmonyJobs.find((job) => job.granule_name === qualityGranuleName.trim()
+      && job.maturity === harmonyWorkflowMaturity && job.polarization === harmonyWorkflowPolarization
+      && job.layer_role !== 'unwrapped_phase'
+      && !['failed', 'error', 'canceled', 'cancelled'].includes(job.status.toLowerCase()));
+    if (existingIndividualCompanion) {
+      setQualityError(`A companion layer was already submitted individually (${existingIndividualCompanion.layer_role}, ${existingIndividualCompanion.job_id}). Continue the one-by-one workflow or reuse the existing jobs; batch submission was blocked to avoid duplicate jobs.`);
       return;
     }
     setQualityError('');
@@ -1020,7 +1432,20 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
         granuleName: qualityGranuleName.trim(),
         phaseJobId: harmonyJobId.trim(),
         coordinates: [...coordinates, coordinates[0]],
+        maturity: harmonyWorkflowMaturity,
+        polarization: harmonyWorkflowPolarization,
       });
+      const batchRecords: SubmittedHarmonyLayerJob[] = Object.entries(response.jobs).map(([role, job]) => ({
+        job_id: job.job_id,
+        granule_name: response.granule_name,
+        layer_role: role as HarmonyLayerRole,
+        polarization: response.polarization === 'VV' ? 'VV' : 'HH',
+        maturity: response.maturity === 'BETA' ? 'BETA' : 'PROVISIONAL',
+        variable: job.variable || '',
+        status: job.status,
+        submitted_at: new Date().toISOString(),
+      }));
+      setSubmittedHarmonyJobs((current) => [...batchRecords, ...current.filter((old) => !batchRecords.some((item) => item.job_id === old.job_id))].slice(0, 40));
       setQualityBundle(response);
       setSourceMaskJobId(response.jobs.mask?.job_id || '');
       setSourceMaskVerification(null);
@@ -1040,35 +1465,56 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   };
 
   const checkQualityLayers = async () => {
-    if (!qualityBundle) return;
+    const jobsToCheck: Record<string, HarmonyQualityLayerJob> = qualityBundle?.jobs || individualLayerJobs;
+    const entries = Object.entries(jobsToCheck);
+    if (!entries.length) {
+      setQualityError('No layer jobs match the currently selected granule, maturity, and polarization. Submit them first.');
+      return;
+    }
     setQualityError('');
     setQualityMessage('Checking NASA Harmony job statuses…');
     setIsQualityChecking(true);
     try {
-      const entries = Object.entries(qualityBundle.jobs);
       const statuses = await Promise.all(entries.map(async ([role, job]) => {
-        const response = await getNisarHarmonyJobStatus(job.job_id);
-        return [role, String(response.job?.status || 'unknown').toLowerCase()] as const;
+        try {
+          const response = await getNisarHarmonyJobStatus(job.job_id);
+          return { role, jobId: job.job_id, status: String(response.job?.status || 'unknown').toLowerCase(), error: undefined as string | undefined };
+        } catch (error) {
+          return { role, jobId: job.job_id, status: String(job.status || 'unknown').toLowerCase(), error: error instanceof Error ? error.message : 'Could not check this job.' };
+        }
       }));
-      const next = Object.fromEntries(statuses);
+      const next = Object.fromEntries(statuses.map((item) => [item.role, item.status]));
       setQualityStatuses(next);
+      const statusById = new Map(statuses.map((item) => [item.jobId, item]));
+      setSubmittedHarmonyJobs((current) => current.map((job) => {
+        const item = statusById.get(job.job_id);
+        return item ? { ...job, status: item.status, status_error: item.error } : job;
+      }));
       const required = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
-      const allRequiredSuccessful = required.every((role) => next[role] === 'successful' || next[role] === 'completed' || next[role] === 'complete');
-      const pending = statuses.filter(([, status]) => !['successful', 'completed', 'complete'].includes(status));
+      const allRequiredPresent = required.every((role) => Boolean(jobsToCheck[role]?.job_id));
+      const allRequiredSuccessful = allRequiredPresent && required.every((role) => ['successful', 'completed', 'complete'].includes(next[role] || ''));
+      const pending = statuses.filter((item) => !['successful', 'completed', 'complete'].includes(item.status));
       setQualityMessage(allRequiredSuccessful
-        ? 'All required quality-layer jobs are complete. You can run the AOI quality diagnostics.'
-        : `${pending.length} layer job(s) are still running or failed. Wait or inspect the status below before analysis.`);
-    } catch (error) {
-      setQualityError(error instanceof Error ? error.message : 'Could not check one or more Harmony jobs.');
-      setQualityMessage('');
+        ? 'All required layer jobs are complete. You can run the AOI quality diagnostics.'
+        : `${pending.length} checked layer job(s) are not complete yet${allRequiredPresent ? '' : '; some required layers are still missing'}. Wait or submit the missing layers before analysis.`);
     } finally {
       setIsQualityChecking(false);
     }
   };
 
   const runQualityAnalysis = async () => {
-    if (!qualityBundle || !areaClosed || coordinates.length < 3) {
-      setQualityError('Start the quality jobs and close the AOI polygon first.');
+    const jobsForAnalysis = qualityBundle?.jobs || individualLayerJobs;
+    const required = ['unwrapped_phase', 'coherence', 'connected_components', 'ionosphere_phase_screen', 'mask'];
+    const missing = required.filter((role) => !jobsForAnalysis[role]?.job_id);
+    if (!areaClosed || coordinates.length < 3 || missing.length) {
+      setQualityError(missing.length
+        ? `Submit the following layer(s) for this exact granule/maturity/polarization first: ${missing.join(', ')}.`
+        : 'Close the AOI polygon before quality analysis.');
+      return;
+    }
+    const pending = required.filter((role) => !['successful', 'completed', 'complete'].includes(String(qualityStatuses[role] || jobsForAnalysis[role]?.status || '').toLowerCase()));
+    if (pending.length) {
+      setQualityError(`Wait for these layer job(s) to succeed before analysis: ${pending.join(', ')}. Refresh job status first.`);
       return;
     }
     setQualityError('');
@@ -1077,8 +1523,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     try {
       const response = await analyzeGunwAoiQuality({
         granuleName: qualityGranuleName.trim(),
+        polarization: harmonyWorkflowPolarization,
         coordinates: [...coordinates, coordinates[0]],
-        jobs: qualityBundle.jobs,
+        jobs: jobsForAnalysis,
       });
       setQualityAnalysis(response);
       setQualityMessage('Quality diagnostics completed. Displacement was not calculated.');
@@ -1107,8 +1554,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
         granuleName: qualityGranuleName.trim(),
         maskJobId: sourceMaskJobId.trim(),
         coordinates: [...coordinates, coordinates[0]],
-        maturity: qualityBundle?.maturity === 'BETA' ? 'BETA' : 'PROVISIONAL',
-        polarization: 'HH',
+        maturity: qualityBundle?.maturity === 'BETA' ? 'BETA' : harmonyWorkflowMaturity,
+        polarization: qualityBundle?.polarization === 'VV' ? 'VV' : harmonyWorkflowPolarization,
       });
       setSourceMaskVerification(response);
     } catch (error) {
@@ -1263,7 +1710,7 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                 </div>
                 <label className="dataset-selector">
                   <span>Data family</span>
-                  <select value={productType} onChange={(event) => { setProductType(event.target.value as NisarProductType); setCatalogResult(null); setCatalogError(''); setAoiWindowResult(null); setAoiWindowError(''); }} aria-label="NISAR product family">
+                  <select value={productType} onChange={(event) => { setProductType(event.target.value as NisarProductType); setCatalogResult(null); setCatalogError(''); setSelectedHarmonyProduct(null); setConfirmFullGranuleLayer(false); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setHarmonyJobId(''); setQualityGranuleName(''); setSourceMaskJobId(''); setSourceMaskVerification(null); }} aria-label="NISAR product family">
                     <option value="GUNW">GUNW · interferometry</option>
                     <option value="GOFF">GOFF · pixel offsets</option>
                   </select>
@@ -1275,7 +1722,37 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                 <button className="demo-button" type="button" disabled={!ready || isProcessing} onClick={runInvestigation}>{isProcessing ? 'Preparing demo...' : 'Reference demo'}</button>
                 {!catalogEligible && <p className="action-hint" role="status">{catalogDisabledReason}</p>}
               </div>
-              {catalogResult && <CatalogPreflightPanel result={catalogResult} onClose={() => setCatalogResult(null)} />}
+              {catalogResult && <CatalogPreflightPanel
+                result={catalogResult}
+                onClose={() => { setCatalogResult(null); setSelectedHarmonyProduct(null); }}
+                onSelectProduct={selectHarmonyProduct}
+                selectedGranuleName={selectedHarmonyProduct?.granule_name || ''}
+              />}
+              {catalogResult && (
+                <HarmonyJobSubmissionPanel
+                  product={selectedHarmonyProduct}
+                  areaClosed={areaClosed}
+                  coordinatesCount={coordinates.length}
+                  layerRole={harmonyLayerRole}
+                  onLayerRoleChange={(value) => { setHarmonyLayerRole(value); setConfirmFullGranuleLayer(false); setHarmonySubmitError(''); }}
+                  maturity={harmonyWorkflowMaturity}
+                  onMaturityChange={(value) => { setHarmonyWorkflowMaturity(value); setConfirmFullGranuleLayer(false); setHarmonyJobId(''); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); setSourceMaskJobId(''); setSourceMaskVerification(null); setSourceMaskVerificationError(''); }}
+                  polarization={harmonyWorkflowPolarization}
+                  onPolarizationChange={(value) => { setHarmonyWorkflowPolarization(value); setConfirmFullGranuleLayer(false); setHarmonyJobId(''); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); setSourceMaskJobId(''); setSourceMaskVerification(null); setSourceMaskVerificationError(''); }}
+                  confirmFullGranule={confirmFullGranuleLayer}
+                  onConfirmFullGranuleChange={setConfirmFullGranuleLayer}
+                  isSubmitting={isSubmittingHarmonyJob}
+                  error={harmonySubmitError}
+                  message={harmonySubmitMessage}
+                  jobs={submittedHarmonyJobs}
+                  checkingJobs={isCheckingSubmittedJobs}
+                  onSubmit={submitSelectedHarmonyLayer}
+                  onCheckJob={checkSubmittedHarmonyJob}
+                  onCheckMatchingJobs={checkSelectedProductHarmonyJobs}
+                  onUseAsPhase={useSubmittedJobAsPhase}
+                  onUseAsMask={useSubmittedJobAsMask}
+                />
+              )}
               {catalogResult && productType === 'GUNW' && (
                 <AoiWindowPanel
                   coordinates={coordinates}
@@ -1290,6 +1767,8 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                   onGranuleNameChange={(value) => { setQualityGranuleName(value); setQualityBundle(null); setQualityAnalysis(null); setSourceMaskJobId(''); setSourceMaskVerification(null); setSourceMaskVerificationError(''); setQualityError(''); setQualityMessage(''); }}
                   qualityBundle={qualityBundle}
                   qualityStatuses={qualityStatuses}
+                  individualLayerJobs={individualLayerJobs}
+                  individualLayersAvailable={individualLayersAvailable}
                   qualityMessage={qualityMessage}
                   qualityError={qualityError}
                   qualityStartLoading={isQualityStarting}

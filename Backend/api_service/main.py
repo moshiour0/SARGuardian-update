@@ -40,12 +40,13 @@ MAX_GRANULES = int(os.getenv("MAX_GRANULES_PER_SEARCH", "50"))
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "6"))
 RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
 BUNDLE_STARTS_PER_HOUR = int(os.getenv("GUNW_BUNDLE_STARTS_PER_HOUR", "2"))
+SINGLE_LAYER_STARTS_PER_HOUR = int(os.getenv("HARMONY_SINGLE_LAYER_STARTS_PER_HOUR", "12"))
 BUNDLE_START_WINDOW_SECONDS = 3600
 HTTP_TIMEOUT_SECONDS = float(os.getenv("ASF_HTTP_TIMEOUT_SECONDS", "35"))
 
 app = FastAPI(
     title="SARGuardian ASF + Harmony Pilot API",
-    version="0.3.0",
+    version="0.3.1",
     description=(
         "Searches ASF metadata, discovers NASA Harmony capabilities, submits an explicitly confirmed "
         "one-granule/one-variable extraction, reads bounded AOI windows from remote COGs, and can compare "
@@ -69,6 +70,7 @@ app.add_middleware(
 _rate_lock = threading.Lock()
 _request_times: dict[str, deque[float]] = defaultdict(deque)
 _bundle_request_times: dict[str, deque[float]] = defaultdict(deque)
+_single_layer_start_times: dict[str, deque[float]] = defaultdict(deque)
 
 
 class CatalogSearchRequest(BaseModel):
@@ -228,6 +230,25 @@ def _check_gunw_bundle_start_limit(key: str) -> None:
         times.append(now)
 
 
+def _check_single_layer_start_limit(key: str) -> None:
+    """Bound repeated public single-layer job submissions per client/hour."""
+    now = time.monotonic()
+    with _rate_lock:
+        times = _single_layer_start_times[key]
+        while times and now - times[0] > BUNDLE_START_WINDOW_SECONDS:
+            times.popleft()
+        if len(times) >= SINGLE_LAYER_STARTS_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"Harmony single-layer job limit reached: {SINGLE_LAYER_STARTS_PER_HOUR} starts "
+                    "per hour per client in this API process. Reuse existing job IDs and check their status."
+                ),
+                headers={"Retry-After": str(BUNDLE_START_WINDOW_SECONDS)},
+            )
+        times.append(now)
+
+
 def _parse_mb(value: Any) -> float | None:
     try:
         number = float(value)
@@ -331,7 +352,9 @@ def health() -> dict[str, Any]:
         "scientific_analysis_performed": False,
         "harmony_capability_discovery": True,
         "single_granule_extraction": "guarded-one-layer-job-submission-available",
+        "frontend_driven_harmony_workflow": "catalogue-product-selection-single-layer-submit-and-job-status-available",
         "multi_layer_gunw_quality_pilot": "companion-layer-jobs-and-aoi-quality-gates-available",
+        "max_harmony_single_layer_submissions_per_hour": SINGLE_LAYER_STARTS_PER_HOUR,
         "aoi_window_read": "available-for-completed-range-enabled-geotiff-results",
         "earthdata_token_configured": bool(os.getenv("EARTHDATA_TOKEN", "").strip()),
         "original_scientific_engine_present": True,
@@ -492,8 +515,8 @@ def harmony_extraction_plan(plan: HarmonyPlanRequest) -> dict[str, Any]:
 
 
 @app.post("/api/harmony/extract/start")
-def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest) -> dict[str, Any]:
-    """Start a guarded one-granule GUNW phase-only Harmony job.
+def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest, http_request: Request) -> dict[str, Any]:
+    """Start one guarded GUNW single-variable Harmony job from the UI/API.
 
     This does not download a raster or run SARGuardian's scientific engine.
     Because the current GUNW service advertises no AOI subset support, callers
@@ -517,6 +540,9 @@ def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest) -
                 product_type="GUNW",
             )
         )
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    _check_single_layer_start_limit(forwarded or client_ip)
     try:
         result = submit_single_layer_job(
             granule_name=request.granule_name.strip(),
@@ -525,8 +551,13 @@ def harmony_start_single_layer_extraction(request: HarmonyExtractStartRequest) -
             layer_role=request.layer_role,
             confirm_full_granule_layer=request.confirm_full_granule_layer,
         )
+        result["product_type"] = "GUNW"
+        result["collection_maturity"] = request.maturity.upper()
+        result["production"] = re.match(r"^NISAR_L2_(PR|UR)_GUNW_", request.granule_name.strip()).group(1)
         result["aoi_coordinates_received"] = len(request.coordinates) if request.coordinates else 0
         result["aoi_area_km2"] = round(aoi_area_km2, 3) if aoi_area_km2 is not None else None
+        result["submitted_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        result["next_step"] = f"Poll GET /api/harmony/jobs/{result['job_id']} until the job succeeds. Then read the selected AOI or submit matching companion layers."
         result["note"] = "The AOI is recorded only for later client-side/server-side cropping; current Harmony extraction is for the full granule layer."
         return result
     except HarmonyLookupError as exc:

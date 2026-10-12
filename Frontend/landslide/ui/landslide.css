@@ -126,3 +126,58 @@
   border-radius: 0.5rem;
   background: rgba(127, 127, 127, 0.08);
 }
+
+/* Front-end Harmony submission workflow: product selection, one-layer jobs, and session job history. */
+.action-bar { max-height: calc(100dvh - 112px); overflow-y: auto; overflow-x: hidden; align-content: start; }
+.catalog-product-row.is-selected { border-color: rgba(154,229,186,.72); background: rgba(66,133,109,.18); }
+.catalog-product-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.catalog-product-actions > span { color: #bcefd1; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.catalog-select-product { min-height: 30px; padding: 5px 8px; border: 1px solid rgba(174,216,255,.45); border-radius: 4px; background: rgba(5,45,57,.7); color: #dff5ff; cursor: pointer; font: 700 9px 'Manrope', sans-serif; white-space: nowrap; }
+.catalog-select-product:disabled { cursor: not-allowed; opacity: .4; }
+.catalog-product-row.is-selected .catalog-select-product { border-color: #9ae5ba; background: #9ae5ba; color: #123e37; }
+.harmony-submit-panel { grid-column: 1 / -1; min-width: 0; max-height: min(38vh, 390px); overflow: auto; padding: 12px; border: 1px solid rgba(154,229,186,.38); border-radius: 5px; background: rgba(3,32,43,.9); }
+.harmony-submit-panel h3 { margin: 5px 0 0; color: #f1fbff; font: 700 16px 'Manrope', sans-serif; }
+.selected-harmony-product { display: grid; gap: 5px; margin-top: 10px; padding: 9px; border: 1px solid rgba(154,229,186,.22); border-radius: 4px; background: rgba(154,229,186,.065); }
+.selected-harmony-product small { color: #9ae5ba; font-size: 8px; font-weight: 800; letter-spacing: .12em; }
+.selected-harmony-product strong { color: #fff; font: 600 10px 'Manrope', sans-serif; overflow-wrap: anywhere; }
+.selected-harmony-product span { color: rgba(238,255,245,.62); font-size: 9px; }
+.harmony-workflow-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.harmony-workflow-fields .aoi-job-label { min-width: 0; }
+.harmony-workflow-fields select, .aoi-job-label select { width: 100%; min-width: 0; box-sizing: border-box; min-height: 36px; padding: 6px 8px; border: 1px solid rgba(226,255,240,.26); border-radius: 4px; background: rgba(4,48,53,.78); color: #f2fff7; font-size: 10px; }
+.harmony-workflow-fields option, .aoi-job-label option { background: #0b3b43; color: #f2fff7; }
+.harmony-full-granule-confirm { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; color: rgba(239,255,246,.8); font-size: 10px; line-height: 1.5; }
+.harmony-full-granule-confirm input { margin: 2px 0 0; flex: 0 0 auto; accent-color: #9ae5ba; }
+.harmony-full-granule-confirm b { color: #b4f1d3; }
+.harmony-submit-button { width: 100%; min-height: 38px; }
+.harmony-submit-button:disabled { opacity: .45; cursor: not-allowed; }
+.submitted-harmony-jobs { display: grid; gap: 8px; margin-top: 13px; padding-top: 11px; border-top: 1px solid rgba(174,216,255,.2); }
+.submitted-harmony-jobs-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.submitted-harmony-jobs-heading > strong { color: #b4f1d3; font: 700 11px 'Manrope', sans-serif; }
+.submitted-harmony-job { display: grid; gap: 5px; padding: 9px; border: 1px solid rgba(226,255,240,.14); border-radius: 4px; background: rgba(4,48,53,.54); }
+.submitted-harmony-job-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.submitted-harmony-job-top strong { color: #e9f7ff; font: 700 10px 'Manrope', sans-serif; text-transform: capitalize; }
+.harmony-job-status { flex: 0 0 auto; padding: 3px 6px; border-radius: 3px; background: rgba(255,216,140,.12); color: #ffe0a4; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.harmony-job-status.is-success { background: rgba(154,229,186,.16); color: #a9f4c8; }
+.harmony-job-status.is-error { background: rgba(255,154,154,.13); color: #ffb9b9; }
+.submitted-harmony-job > small { color: rgba(238,255,245,.62); font-size: 9px; overflow-wrap: anywhere; }
+.submitted-harmony-job > code { color: #9ecce8; font-size: 10px; overflow-wrap: anywhere; user-select: text; }
+.submitted-harmony-job-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.submitted-harmony-job-actions > span { flex: 1 1 100%; color: rgba(238,255,245,.55); font-size: 8px; }
+.submitted-harmony-job-actions .demo-button { min-height: 28px; padding: 4px 7px; font-size: 9px; }
+@media (max-width: 1020px) {
+  .action-bar { max-height: calc(100dvh - 96px); }
+  .harmony-submit-panel { max-height: 34vh; }
+  .catalog-product-actions { align-items: flex-end; flex-direction: column; }
+}
+@media (max-width: 640px) {
+  .action-bar { right: 8px; left: 8px; bottom: 8px; padding: 8px; max-height: calc(100dvh - 88px); grid-template-columns: minmax(0, 1fr) auto; }
+  .harmony-submit-panel { max-height: 34vh; padding: 9px; }
+  .harmony-submit-panel h3 { font-size: 13px; }
+  .harmony-workflow-fields { grid-template-columns: 1fr 1fr; gap: 5px 8px; }
+  .harmony-workflow-fields .aoi-job-label:first-child { grid-column: 1 / -1; }
+  .catalog-product-row { flex-direction: column; gap: 8px; }
+  .catalog-product-actions { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; }
+  .catalog-product-main { width: 100%; }
+  .catalog-product-main strong { max-width: 100%; }
+  .submitted-harmony-jobs-heading { align-items: flex-start; flex-direction: column; }
+}
