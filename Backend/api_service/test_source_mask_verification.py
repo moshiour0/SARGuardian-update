@@ -30,8 +30,13 @@ def _make_source(path, values):
         unwrapped = freq.require_group("unwrappedInterferogram")
         mask_ds = unwrapped.create_dataset("mask", data=np.asarray(values, dtype=np.uint32))
         mask_ds.attrs["grid_mapping"] = "projection"
+        mask_ds.attrs["long_name"] = "Synthetic native GUNW mask for verification test"
+        mask_ds.attrs["description"] = "Synthetic mask metadata; not a real NISAR specification."
         mask_ds.dims[0].attach_scale(y_ds)
         mask_ds.dims[1].attach_scale(x_ds)
+        hh = unwrapped.require_group("HH")
+        valid_mask = hh.create_dataset("validDataMask", data=np.ones((y_len, x_len), dtype=np.uint8))
+        valid_mask.attrs["long_name"] = "Synthetic polarization valid data mask"
     return Affine(10, 0, 500000, 0, -10, 3300000)
 
 
@@ -94,6 +99,10 @@ def test_native_source_mask_exactly_matches_cog_window(patch_remote_source):
     assert result["comparison"]["comparable_pixels"] == source.size
     assert result["comparison"]["exact_matches"] == source.size
     assert result["comparison"]["mismatches"] == 0
+    assert result["source_mask_bit_counts"]["samples"] == source.size
+    assert result["source_mask_bit_counts"]["bit_24_set_pixels"] == 1
+    assert result["native_mask_metadata"]["selected_attributes"]["long_name"] == "Synthetic native GUNW mask for verification test"
+    assert any(item["path"].endswith("/validDataMask") for item in result["related_mask_qa_objects"])
     assert result["full_source_hdf5_downloaded"] is False
     assert result["persistent_storage_used"] is False
 

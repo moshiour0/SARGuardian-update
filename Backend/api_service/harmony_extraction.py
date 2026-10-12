@@ -1025,6 +1025,88 @@ def _nearest_monotonic_indices(axis: Any, targets: Any) -> tuple[Any, Any, float
     return indices.astype(np.int64), errors, posting
 
 
+def _safe_h5_metadata_value(value: Any, np: Any, *, max_items: int = 16) -> Any:
+    """Make a bounded, JSON-safe view of HDF5 metadata values only."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip("\x00 \t\r\n")[:500]
+    if isinstance(value, str):
+        return value.strip("\x00 \t\r\n")[:500]
+    if isinstance(value, np.generic):
+        return _safe_h5_metadata_value(value.item(), np, max_items=max_items)
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return _safe_h5_metadata_value(value.item(), np, max_items=max_items)
+        if value.size > max_items:
+            return {"shape": [int(n) for n in value.shape], "dtype": str(value.dtype), "preview": [
+                _safe_h5_metadata_value(item, np, max_items=max_items) for item in value.reshape(-1)[:max_items]
+            ]}
+        return [_safe_h5_metadata_value(item, np, max_items=max_items) for item in value.reshape(-1)]
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    if isinstance(value, (list, tuple)):
+        values = list(value)
+        if len(values) > max_items:
+            return {"length": len(values), "preview": [
+                _safe_h5_metadata_value(item, np, max_items=max_items) for item in values[:max_items]
+            ]}
+        return [_safe_h5_metadata_value(item, np, max_items=max_items) for item in values]
+    return str(value)[:500]
+
+
+def _selected_h5_attributes(attrs: Any, np: Any) -> dict[str, Any]:
+    """Return attribute names plus values useful for interpreting masks/QA; no raster values."""
+    terms = ("long_name", "description", "standard_name", "units", "flag", "mask", "fill", "valid", "grid", "comment", "source", "version", "ionosphere", "quality", "qa")
+    result: dict[str, Any] = {"attribute_names": sorted(str(key) for key in attrs.keys())}
+    selected: dict[str, Any] = {}
+    for raw_key in attrs.keys():
+        key = str(raw_key)
+        if any(term in key.lower() for term in terms):
+            try:
+                selected[key] = _safe_h5_metadata_value(attrs[raw_key], np)
+            except Exception:
+                selected[key] = "<attribute could not be decoded>"
+    result["selected_attributes"] = selected
+    return result
+
+
+def _related_mask_qa_objects(h5_file: Any, h5py_module: Any, np: Any) -> list[dict[str, Any]]:
+    """List a bounded set of related QA/mask datasets without reading their raster pixels."""
+    results: list[dict[str, Any]] = []
+    roots = (
+        "/science/LSAR/GUNW/grids/frequencyA",
+        "/science/LSAR/GUNW/metadata",
+    )
+    seen: set[str] = set()
+    terms = ("validdatamask", "inputdataexceptionmask", "ionosphereoutlier", "ionosphere", "mask", "quality", "qa", "productversion", "softwareversion")
+    for root_path in roots:
+        if root_path not in h5_file:
+            continue
+        def visitor(relative_path: str, obj: Any) -> None:
+            if len(results) >= 40:
+                return
+            full_path = root_path.rstrip("/") + "/" + relative_path.strip("/") if relative_path else root_path
+            if full_path in seen:
+                return
+            basename = full_path.rsplit("/", 1)[-1].lower()
+            if not any(term in basename for term in terms):
+                return
+            # Avoid echoing arbitrary content: include object descriptors and a small attribute allowlist only.
+            item: dict[str, Any] = {"path": full_path, "object_type": "dataset" if isinstance(obj, h5py_module.Dataset) else "group"}
+            if isinstance(obj, h5py_module.Dataset):
+                item["dtype"] = str(obj.dtype)
+                if obj.shape is not None:
+                    item["shape"] = [int(n) for n in obj.shape]
+            item["metadata"] = _selected_h5_attributes(obj.attrs, np)
+            results.append(item)
+            seen.add(full_path)
+        try:
+            h5_file[root_path].visititems(visitor)
+        except Exception:
+            # Related metadata is supplementary; the primary source/COG comparison remains valid.
+            continue
+    return results
+
+
 def _integer_pair_counts(source_values: Any, cog_values: Any, compared: Any) -> list[dict[str, int]]:
     import numpy as np
     source = np.asarray(source_values)[compared].astype(np.uint64, copy=False)
@@ -1235,6 +1317,30 @@ def verify_gunw_source_mask(
                     float32_rounding_compatible = int((eligible & (rounded_native == cog_int)).sum())
                 pair_counts = _integer_pair_counts(source_uint, cog_int, mismatches)
                 src_dtype = str(source_mask_ds.dtype)
+                source_samples = source_uint[comparable]
+                low_byte = source_samples & np.uint64(0xFF)
+                secondary_exception_byte = (source_samples >> np.uint64(8)) & np.uint64(0xFF)
+                reference_exception_byte = (source_samples >> np.uint64(16)) & np.uint64(0xFF)
+                bit_24_set = (source_samples & np.uint64(1 << 24)) != 0
+                upper_reserved_bits_set = (source_samples & np.uint64(0xFE000000)) != 0
+                def count_values(values: Any) -> list[dict[str, int]]:
+                    unique, counts = np.unique(np.asarray(values), return_counts=True)
+                    order = np.argsort(counts)[::-1][:16]
+                    return [{"value": int(unique[idx]), "count": int(counts[idx])} for idx in order]
+                source_bit_counts = {
+                    "samples": int(source_samples.size),
+                    "low_byte_values": count_values(low_byte),
+                    "secondary_exception_byte_nonzero_pixels": int(np.count_nonzero(secondary_exception_byte)),
+                    "reference_exception_byte_nonzero_pixels": int(np.count_nonzero(reference_exception_byte)),
+                    "bit_24_set_pixels": int(np.count_nonzero(bit_24_set)),
+                    "bit_24_clear_pixels": int(source_samples.size - np.count_nonzero(bit_24_set)),
+                    "bits_25_to_31_nonzero_pixels": int(np.count_nonzero(upper_reserved_bits_set)),
+                    "full_values": count_values(source_samples),
+                }
+                native_mask_metadata = _selected_h5_attributes(source_mask_ds.attrs, np)
+                native_mask_group_metadata = _selected_h5_attributes(source_mask_ds.parent.attrs, np)
+                related_qa_objects = _related_mask_qa_objects(source_h5, h5py, np)
+                src_dtype = str(source_mask_ds.dtype)
                 return {
                     "service": "SARGuardian native GUNW source-mask verifier",
                     "mode": "source-mask-window-compared",
@@ -1251,6 +1357,11 @@ def verify_gunw_source_mask(
                     "native_mask_dataset_path": mask_path,
                     "native_mask_dtype": src_dtype,
                     "native_mask_shape": [int(source_mask_ds.shape[0]), int(source_mask_ds.shape[1])],
+                    "native_mask_metadata": native_mask_metadata,
+                    "native_mask_parent_group": str(source_mask_ds.parent.name),
+                    "native_mask_parent_metadata": native_mask_group_metadata,
+                    "source_mask_bit_counts": source_bit_counts,
+                    "related_mask_qa_objects": related_qa_objects,
                     "native_x_coordinates_path": x_path,
                     "native_y_coordinates_path": y_path,
                     "native_projection_dataset_path": projection_path,
@@ -1288,7 +1399,7 @@ def verify_gunw_source_mask(
                         "No valid source/COG pixel pairs were available to compare. Verification is inconclusive."
                     ),
                     "next_step": (
-                        "No mask conversion mismatch was found in the compared AOI window. Keep the strict gate and verify the source mask flag semantics / product QA metadata."
+                        "No mask conversion mismatch was found in the compared AOI window. The response now includes native mask attributes, AOI bit/byte counts, and related source QA/mask metadata objects. Use those metadata to confirm flag semantics; do not relax the strict gate."
                         if mismatch_count == 0 and match_count > 0 else
                         "Inspect mismatch_pairs_top10 and the native dataset type. If mismatches are compatible with float32 rounding, trace the Harmony/GDAL conversion before revisiting any gate."
                         if mismatch_count > 0 else

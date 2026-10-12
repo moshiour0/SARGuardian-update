@@ -644,6 +644,38 @@ function AoiWindowPanel({
                 <div><span>float32-rounding-compatible mismatches</span><strong>{sourceMaskVerification.comparison?.mismatches_compatible_with_float32_rounding ?? '—'}</strong></div>
               </div>
               {sourceMaskVerification.native_mask_dataset_path && <small>Native dataset: {sourceMaskVerification.native_mask_dataset_path}</small>}
+              {sourceMaskVerification.source_mask_bit_counts && (
+                <div className="layer-mask-decoding">
+                  <strong>Native source mask bit/byte counts (comparable AOI pixels)</strong>
+                  <small>Samples counted: {sourceMaskVerification.source_mask_bit_counts.samples ?? '—'}</small>
+                  <small>Bit 24 set: {sourceMaskVerification.source_mask_bit_counts.bit_24_set_pixels ?? '—'} · Bit 24 clear: {sourceMaskVerification.source_mask_bit_counts.bit_24_clear_pixels ?? '—'}</small>
+                  <small>Reference-exception byte nonzero: {sourceMaskVerification.source_mask_bit_counts.reference_exception_byte_nonzero_pixels ?? '—'} · Secondary-exception byte nonzero: {sourceMaskVerification.source_mask_bit_counts.secondary_exception_byte_nonzero_pixels ?? '—'}</small>
+                  <small>Bits 25–31 nonzero: {sourceMaskVerification.source_mask_bit_counts.bits_25_to_31_nonzero_pixels ?? '—'}</small>
+                  {!!sourceMaskVerification.source_mask_bit_counts.low_byte_values?.length && <small>Native low-byte counts: {sourceMaskVerification.source_mask_bit_counts.low_byte_values.map((item) => `${item.value} (${item.count})`).join(', ')}</small>}
+                  {!!sourceMaskVerification.source_mask_bit_counts.full_values?.length && <small>Native full mask values: {sourceMaskVerification.source_mask_bit_counts.full_values.map((item) => `${item.value} (${item.count})`).join(', ')}</small>}
+                </div>
+              )}
+              {sourceMaskVerification.native_mask_metadata && (
+                <details className="aoi-layer-details">
+                  <summary>Native mask HDF5 attributes</summary>
+                  <small>Attribute names: {(sourceMaskVerification.native_mask_metadata.attribute_names || []).join(', ') || 'none exposed'}</small>
+                  <pre className="source-mask-json">{JSON.stringify(sourceMaskVerification.native_mask_metadata.selected_attributes || {}, null, 2)}</pre>
+                  {sourceMaskVerification.native_mask_parent_metadata && <><small>Parent group: {sourceMaskVerification.native_mask_parent_group || '—'}</small><pre className="source-mask-json">{JSON.stringify(sourceMaskVerification.native_mask_parent_metadata.selected_attributes || {}, null, 2)}</pre></>}
+                </details>
+              )}
+              {!!sourceMaskVerification.related_mask_qa_objects?.length && (
+                <details className="aoi-layer-details">
+                  <summary>Related source QA/mask metadata ({sourceMaskVerification.related_mask_qa_objects.length})</summary>
+                  {sourceMaskVerification.related_mask_qa_objects.map((item) => (
+                    <div className="layer-diagnostic-card" key={item.path}>
+                      <small><strong>{item.object_type}</strong> · {item.path}</small>
+                      {item.dtype && <small>dtype {item.dtype} · shape {(item.shape || []).join(' × ')}</small>}
+                      {!!item.metadata?.attribute_names?.length && <small>Attributes: {item.metadata.attribute_names.join(', ')}</small>}
+                      {!!Object.keys(item.metadata?.selected_attributes || {}).length && <pre className="source-mask-json">{JSON.stringify(item.metadata?.selected_attributes, null, 2)}</pre>}
+                    </div>
+                  ))}
+                </details>
+              )}
               {sourceMaskVerification.comparison?.mismatch_pairs_top10?.length ? (
                 <small>Most common source → COG pairs: {sourceMaskVerification.comparison.mismatch_pairs_top10.map((item) => `${item.source_value} → ${item.cog_value} (${item.count})`).join(', ')}</small>
               ) : null}

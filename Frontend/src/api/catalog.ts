@@ -244,6 +244,23 @@ export type NativeSourceMaskVerificationResponse = {
   native_mask_dataset_path?: string;
   native_mask_dtype?: string;
   native_mask_shape?: number[];
+  native_mask_metadata?: { attribute_names?: string[]; selected_attributes?: Record<string, unknown> };
+  native_mask_parent_group?: string;
+  native_mask_parent_metadata?: { attribute_names?: string[]; selected_attributes?: Record<string, unknown> };
+  source_mask_bit_counts?: {
+    samples?: number;
+    low_byte_values?: Array<{ value: number; count: number }>;
+    secondary_exception_byte_nonzero_pixels?: number;
+    reference_exception_byte_nonzero_pixels?: number;
+    bit_24_set_pixels?: number;
+    bit_24_clear_pixels?: number;
+    bits_25_to_31_nonzero_pixels?: number;
+    full_values?: Array<{ value: number; count: number }>;
+  };
+  related_mask_qa_objects?: Array<{
+    path: string; object_type: string; dtype?: string; shape?: number[];
+    metadata?: { attribute_names?: string[]; selected_attributes?: Record<string, unknown> };
+  }>;
   native_x_coordinates_path?: string;
   native_y_coordinates_path?: string;
   native_projection_dataset_path?: string;
