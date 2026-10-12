@@ -1,8 +1,9 @@
-"""Lightweight SARGuardian metadata preflight API.
+"""Lightweight SARGuardian metadata, Harmony, and native-mask QA API.
 
-This service searches ASF's public catalogue only. It does not download NISAR
-products, store granules, or claim to perform scientific change analysis.
-It is intentionally small enough for a low-resource free web service.
+The service searches ASF metadata, reads bounded AOI windows from remote
+Harmony COGs, and can compare a native GUNW HDF5 mask window using authenticated
+HTTP range access. It does not intentionally fetch/persist complete granule
+files or claim validated displacement or landslide detection.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from harmony_preflight import get_harmony_capabilities, build_extraction_plan, H
 from harmony_extraction import (
     submit_single_layer_job, get_harmony_job_status, inspect_harmony_job_result,
     crop_harmony_job_result_aoi, start_gunw_quality_layer_jobs, analyze_gunw_aoi_layers,
-    HarmonyJobError,
+    verify_gunw_source_mask, HarmonyJobError,
 )
 
 from fastapi import FastAPI, HTTPException, Request
@@ -47,9 +48,9 @@ app = FastAPI(
     version="0.3.0",
     description=(
         "Searches ASF metadata, discovers NASA Harmony capabilities, submits an explicitly confirmed "
-        "one-granule/one-variable extraction, and can read a bounded AOI window from a completed "
-        "Cloud-Optimized GeoTIFF using remote byte ranges. It does not persist raster files or claim "
-        "to perform validated displacement analysis from a single phase layer."
+        "one-granule/one-variable extraction, reads bounded AOI windows from remote COGs, and can compare "
+        "a native GUNW HDF5 mask window with authenticated HTTP range reads. It does not persist complete "
+        "raster/source files or claim validated displacement analysis from a single phase layer."
     ),
 )
 
@@ -145,6 +146,18 @@ class HarmonyGunwAoiAnalyzeRequest(BaseModel):
     mask_job_id: str = Field(min_length=8, max_length=128)
     ionosphere_phase_screen_uncertainty_job_id: str | None = Field(default=None, min_length=8, max_length=128)
     coherence_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+
+
+
+class HarmonySourceMaskVerifyRequest(BaseModel):
+    granule_name: str = Field(min_length=20, max_length=300)
+    mask_job_id: str = Field(min_length=8, max_length=128)
+    coordinates: list[tuple[float, float]] = Field(
+        min_length=3,
+        description="AOI polygon in WGS84 [longitude, latitude] pairs.",
+    )
+    maturity: str = Field(default="PROVISIONAL", description="Native NISAR source collection family: PROVISIONAL or BETA.")
+    polarization: str = Field(default="HH", description="Polarization associated with the GUNW quality layers: HH or VV.")
 
 
 def _close_ring(coords: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -595,6 +608,39 @@ def harmony_analyze_gunw_aoi_quality(request: HarmonyGunwAoiAnalyzeRequest, http
             coordinates=coords,
             job_ids=job_ids,
             coherence_threshold=request.coherence_threshold,
+        )
+        result["aoi_area_km2"] = round(area_km2, 3)
+        return result
+    except HarmonyJobError as exc:
+        message = str(exc)
+        status_code = 503 if "EARTHDATA_TOKEN is not configured" in message else 409 if ("not complete" in message or "successful" in message) else 502
+        raise HTTPException(status_code=status_code, detail=message) from exc
+
+
+@app.post("/api/harmony/gunw-quality/verify-source-mask")
+def harmony_verify_gunw_source_mask(request: HarmonySourceMaskVerifyRequest, http_request: Request) -> dict[str, Any]:
+    """Compare a small native HDF5 mask window with the matching Harmony mask COG."""
+    client_ip = http_request.client.host if http_request.client else "unknown"
+    forwarded = http_request.headers.get("x-forwarded-for", "").split(",", 1)[0].strip()
+    _check_rate_limit("source-mask-verify:" + (forwarded or client_ip))
+    if request.polarization.upper() not in {"HH", "VV"}:
+        raise HTTPException(status_code=422, detail="polarization must be HH or VV.")
+    if request.maturity.upper() not in {"PROVISIONAL", "BETA"}:
+        raise HTTPException(status_code=422, detail="maturity must be PROVISIONAL or BETA.")
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    coords, _start, _end, area_km2 = _validate_search(CatalogSearchRequest(
+        coordinates=request.coordinates,
+        start_date=today_utc,
+        end_date=today_utc,
+        product_type="GUNW",
+    ))
+    try:
+        result = verify_gunw_source_mask(
+            granule_name=request.granule_name.strip(),
+            mask_job_id=request.mask_job_id.strip(),
+            maturity=request.maturity.upper(),
+            polarization=request.polarization.upper(),
+            coordinates=coords,
         )
         result["aoi_area_km2"] = round(area_km2, 3)
         return result

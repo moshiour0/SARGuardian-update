@@ -27,3 +27,7 @@ pytest==9.1.1           # min 7.0
 
 # Optional — notebooks. Not pinned because nothing in the results depends on it.
 # jupyterlab>=4.0
+
+# Authenticated remote HDF5 range reading for native GUNW mask verification
+earthaccess>=0.14.0,<1.0
+fsspec>=2025.3.0,<2027.0

@@ -1,10 +1,10 @@
-"""Guarded one-layer NISAR GUNW extraction job starter for NASA Harmony.
+"""Guarded NISAR GUNW Harmony extraction and AOI quality diagnostics.
 
-This module only submits a one-granule, one-variable, GeoTIFF job and checks
-its job metadata. It never downloads result rasters. Because the current GUNW
-net2cog capability has variable subset but not AOI subset, users must explicitly
-confirm that the first pilot may process a full-granule layer. AOI cropping and
-integration with the original HDF5-based reader are a subsequent step.
+The module queues one-variable Harmony jobs, reads bounded AOI windows from
+remote COG results, and can compare the same window against the native GUNW
+HDF5 mask using authenticated HTTP range access. It does not intentionally
+fetch or persist complete source/results files and does not compute validated
+LOS displacement or landslide detections.
 """
 from __future__ import annotations
 
@@ -975,6 +975,333 @@ def _read_job_aoi_layer(
     layer["expected_variable"] = expected_variable
     return layer
 
+
+def _decode_h5_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip("\x00 \t\r\n")
+    return str(value).strip("\x00 \t\r\n")
+
+
+def _h5_dataset_by_basename(h5_file: Any, basename: str, preferred: list[str], h5py_module: Any) -> tuple[str, Any]:
+    """Resolve a named coordinate/projection dataset without reading raster arrays."""
+    for path in preferred:
+        clean = path if path.startswith("/") else "/" + path
+        if clean in h5_file and isinstance(h5_file[clean], h5py_module.Dataset):
+            return clean, h5_file[clean]
+    candidates: list[str] = []
+    def visitor(path: str, obj: Any) -> None:
+        if isinstance(obj, h5py_module.Dataset) and path.rsplit("/", 1)[-1] == basename and "/science/LSAR/GUNW/grids/frequencyA/" in ("/" + path):
+            candidates.append("/" + path)
+    h5_file.visititems(visitor)
+    if len(candidates) == 1:
+        return candidates[0], h5_file[candidates[0]]
+    if candidates:
+        # Prefer an axis or mapping dataset closest to the mask's group; never guess if ambiguous.
+        raise HarmonyJobError(f"The original GUNW HDF5 contains multiple candidate {basename} datasets; source-mask alignment cannot be verified safely.")
+    raise HarmonyJobError(f"The original GUNW HDF5 does not expose a recognizable {basename} dataset in frequencyA; source-mask alignment cannot be verified safely.")
+
+
+def _nearest_monotonic_indices(axis: Any, targets: Any) -> tuple[Any, Any, float]:
+    """Return nearest source-axis indices, coordinate errors, and median posting."""
+    import numpy as np
+    values = np.asarray(axis, dtype=np.float64)
+    target_values = np.asarray(targets, dtype=np.float64)
+    if values.ndim != 1 or values.size < 2 or not np.isfinite(values).all():
+        raise HarmonyJobError("The source HDF5 coordinate axis is empty or invalid.")
+    diffs = np.diff(values)
+    ascending = bool(np.all(diffs > 0))
+    descending = bool(np.all(diffs < 0))
+    if not (ascending or descending):
+        raise HarmonyJobError("The source HDF5 coordinate axis is not strictly monotonic; exact pixel alignment cannot be verified.")
+    search_axis = values if ascending else values[::-1]
+    positions = np.searchsorted(search_axis, target_values, side="left")
+    left = np.clip(positions - 1, 0, search_axis.size - 1)
+    right = np.clip(positions, 0, search_axis.size - 1)
+    use_right = np.abs(search_axis[right] - target_values) < np.abs(search_axis[left] - target_values)
+    selected = np.where(use_right, right, left)
+    errors = np.abs(search_axis[selected] - target_values)
+    indices = selected if ascending else values.size - 1 - selected
+    posting = float(np.median(np.abs(diffs)))
+    return indices.astype(np.int64), errors, posting
+
+
+def _integer_pair_counts(source_values: Any, cog_values: Any, compared: Any) -> list[dict[str, int]]:
+    import numpy as np
+    source = np.asarray(source_values)[compared].astype(np.uint64, copy=False)
+    cog = np.asarray(cog_values)[compared].astype(np.uint64, copy=False)
+    if source.size == 0:
+        return []
+    pairs = np.column_stack((source, cog))
+    unique, counts = np.unique(pairs, axis=0, return_counts=True)
+    order = np.argsort(counts)[::-1][:10]
+    return [
+        {"source_value": int(unique[idx, 0]), "cog_value": int(unique[idx, 1]), "count": int(counts[idx])}
+        for idx in order
+    ]
+
+
+def verify_gunw_source_mask(
+    *, granule_name: str, mask_job_id: str, maturity: str, polarization: str,
+    coordinates: list[tuple[float, float]],
+) -> dict[str, Any]:
+    """Compare a tiny native HDF5 mask window to its Harmony COG counterpart.
+
+    Uses authenticated HTTP range reads through Earthaccess/fsspec and h5py's
+    file-like driver. It does not download or persist the complete HDF5 product.
+    A result is verified only when the native dataset is available and exact
+    source/COG grid alignment has been independently established.
+    """
+    import numpy as np
+    import rasterio
+    from affine import Affine
+
+    name = granule_name.strip()
+    pol = polarization.upper()
+    maturity_key = maturity.upper()
+    if not re.fullmatch(r"NISAR_L2_(?:PR|UR)_GUNW_[A-Za-z0-9_]+", name):
+        raise HarmonyJobError("Provide an exact NISAR L2 PR/UR GUNW granule name; arbitrary URLs are not accepted.")
+    if pol not in {"HH", "VV"}:
+        raise HarmonyJobError("Polarization must be HH or VV.")
+    if maturity_key not in {"PROVISIONAL", "BETA"}:
+        raise HarmonyJobError("Maturity must be PROVISIONAL or BETA.")
+    if not JOB_ID_RE.fullmatch(mask_job_id):
+        raise HarmonyJobError("Invalid Harmony mask job ID.")
+    expected_mask_variable = _expected_gunw_variable("mask", pol)
+    cog_mask = _read_job_aoi_layer(
+        job_id=mask_job_id,
+        granule_name=name,
+        polarization=pol,
+        role="mask",
+        coordinates=coordinates,
+    )
+    cog_values = np.asarray(cog_mask["values"])
+    inside = np.asarray(cog_mask["inside"], dtype=bool)
+    cog_valid = np.asarray(cog_mask["valid_data"], dtype=bool) & inside & np.isfinite(cog_values)
+    grid = cog_mask.get("grid") or {}
+    if not grid or not grid.get("window_transform"):
+        raise HarmonyJobError("The Harmony mask COG did not provide its AOI grid transform; native source comparison is not possible.")
+    transform_values = tuple(float(value) for value in grid["window_transform"])
+    if len(transform_values) < 6:
+        raise HarmonyJobError("The Harmony mask COG provided an incomplete grid transform; native source comparison is not possible.")
+    cog_transform = Affine(*transform_values[:6])
+    height, width = cog_values.shape
+    if height != int(grid.get("window_height", height)) or width != int(grid.get("window_width", width)):
+        raise HarmonyJobError("The Harmony mask AOI array does not match its reported window dimensions.")
+    if abs(cog_transform.b) > 1e-8 or abs(cog_transform.d) > 1e-8:
+        raise HarmonyJobError("The Harmony mask COG uses a rotated grid; this diagnostic currently requires a north-up grid.")
+    cog_x = cog_transform.c + (np.arange(width, dtype=np.float64) + 0.5) * cog_transform.a
+    cog_y = cog_transform.f + (np.arange(height, dtype=np.float64) + 0.5) * cog_transform.e
+
+    token = _token()
+    try:
+        import earthaccess
+        import h5py
+    except ImportError as exc:
+        raise HarmonyJobError(
+            "Native source verification dependencies are not installed. Redeploy the backend after installing earthaccess, h5py, and fsspec; no source mask was verified."
+        ) from exc
+
+    short_name = f"NISAR_L2_GUNW_{maturity_key}_V1"
+    source_url = (
+        "https://nisar.asf.earthdatacloud.nasa.gov/NISAR/"
+        f"{short_name}/{name}/{name}.h5"
+    )
+    try:
+        # Reuse the same backend-only Earthdata token already used by Harmony.
+        os.environ["EARTHDATA_TOKEN"] = token
+        auth = earthaccess.login(strategy="environment")
+        if not getattr(auth, "authenticated", False):
+            raise RuntimeError("Earthdata authentication did not complete")
+        http_fs = earthaccess.get_fsspec_https_session()
+        # fsspec performs bounded HTTP range reads; the HDF5 file is never saved.
+        with http_fs.open(source_url, "rb", block_size=2 * 1024 * 1024, cache_type="readahead") as remote_file:
+            with h5py.File(remote_file, "r") as source_h5:
+                mask_path_candidates = [
+                    "/science/LSAR/GUNW/grids/frequencyA/unwrappedInterferogram/mask",
+                    "/science/LSAR/GUNW/grids/frequencyA/mask",
+                ]
+                mask_path = next((path for path in mask_path_candidates if path in source_h5 and isinstance(source_h5[path], h5py.Dataset)), None)
+                if mask_path is None:
+                    raise HarmonyJobError("The original HDF5 did not contain the expected native GUNW mask dataset; source verification is inconclusive.")
+                source_mask_ds = source_h5[mask_path]
+                if source_mask_ds.ndim != 2 or not np.issubdtype(source_mask_ds.dtype, np.integer):
+                    raise HarmonyJobError(f"The native GUNW mask dataset type/shape is unexpected ({source_mask_ds.dtype}, {source_mask_ds.shape}); no policy decision was made.")
+                base = "/science/LSAR/GUNW/grids/frequencyA"
+                def attached_scale_paths(dimension_index: int) -> list[str]:
+                    try:
+                        return [str(scale.name) for scale in source_mask_ds.dims[dimension_index].values()]
+                    except Exception:
+                        return []
+                # Prefer dimension scales actually attached to the native mask, then
+                # fall back to conventional GUNW paths. This avoids choosing an axis
+                # belonging to a different grid when the HDF5 contains several grids.
+                x_preferred = attached_scale_paths(1) + [
+                    f"{base}/xCoordinates", f"{source_mask_ds.parent.name}/xCoordinates",
+                ]
+                y_preferred = attached_scale_paths(0) + [
+                    f"{base}/yCoordinates", f"{source_mask_ds.parent.name}/yCoordinates",
+                ]
+                x_path, x_ds = _h5_dataset_by_basename(source_h5, "xCoordinates", x_preferred, h5py)
+                y_path, y_ds = _h5_dataset_by_basename(source_h5, "yCoordinates", y_preferred, h5py)
+                x_axis = np.asarray(x_ds[...], dtype=np.float64)
+                y_axis = np.asarray(y_ds[...], dtype=np.float64)
+                if source_mask_ds.shape != (y_axis.size, x_axis.size):
+                    raise HarmonyJobError(
+                        f"Native mask shape {source_mask_ds.shape} does not match y/x coordinate lengths {(y_axis.size, x_axis.size)}; source comparison is inconclusive."
+                    )
+                mapping_attr = source_mask_ds.attrs.get("grid_mapping", "projection")
+                mapping_name = _decode_h5_text(mapping_attr)
+                projection_candidates = [
+                    f"{source_mask_ds.parent.name}/{mapping_name}",
+                    f"{base}/{mapping_name}",
+                    f"{source_mask_ds.parent.name}/projection",
+                    f"{base}/projection",
+                ]
+                projection_path = next((path for path in projection_candidates if path in source_h5 and isinstance(source_h5[path], h5py.Dataset)), None)
+                if projection_path is None:
+                    projection_path, projection_ds = _h5_dataset_by_basename(source_h5, "projection", projection_candidates, h5py)
+                else:
+                    projection_ds = source_h5[projection_path]
+                projection_value = projection_ds[()]
+                try:
+                    source_epsg = int(np.asarray(projection_value).item())
+                except (TypeError, ValueError):
+                    raw_epsg = projection_ds.attrs.get("epsg_code") or projection_ds.attrs.get("EPSG")
+                    if raw_epsg is None:
+                        raise HarmonyJobError("Native GUNW projection metadata did not expose an EPSG integer; source-grid alignment is inconclusive.")
+                    source_epsg = int(np.asarray(raw_epsg).item())
+                source_crs = rasterio.crs.CRS.from_epsg(source_epsg)
+                cog_crs = rasterio.crs.CRS.from_user_input(str(grid.get("crs", "")))
+                if source_crs != cog_crs:
+                    raise HarmonyJobError(
+                        f"Native source CRS {source_crs} differs from Harmony COG CRS {cog_crs}; pixelwise mask comparison was stopped."
+                    )
+                col_indices, x_errors, x_posting = _nearest_monotonic_indices(x_axis, cog_x)
+                row_indices, y_errors, y_posting = _nearest_monotonic_indices(y_axis, cog_y)
+                x_tolerance = max(0.01, x_posting * 1e-4)
+                y_tolerance = max(0.01, y_posting * 1e-4)
+                x_aligned = bool(np.all(x_errors <= x_tolerance))
+                y_aligned = bool(np.all(y_errors <= y_tolerance))
+                x_steps = np.diff(col_indices)
+                y_steps = np.diff(row_indices)
+                x_contiguous = x_steps.size == 0 or bool(np.all(np.abs(x_steps) == 1))
+                y_contiguous = y_steps.size == 0 or bool(np.all(np.abs(y_steps) == 1))
+                if not (x_aligned and y_aligned and x_contiguous and y_contiguous):
+                    return {
+                        "service": "SARGuardian native GUNW source-mask verifier",
+                        "mode": "source-mask-grid-not-aligned",
+                        "verified": False,
+                        "comparison_performed": False,
+                        "granule_name": name,
+                        "polarization": pol,
+                        "native_source_file_opened": True,
+                        "native_mask_dataset_path": mask_path,
+                        "native_mask_dtype": str(source_mask_ds.dtype),
+                        "native_crs": str(source_crs),
+                        "cog_crs": str(cog_crs),
+                        "max_x_center_error_m": round(float(np.max(x_errors)) if x_errors.size else 0.0, 6),
+                        "max_y_center_error_m": round(float(np.max(y_errors)) if y_errors.size else 0.0, 6),
+                        "full_source_hdf5_downloaded": False,
+                        "aoi_source_window_read_remotely": False,
+                        "persistent_storage_used": False,
+                        "message": "The native source and Harmony COG pixel centres do not align within a strict tolerance. Pixelwise comparison was stopped; no mask gate was changed.",
+                    }
+                row_start, row_end = int(row_indices.min()), int(row_indices.max()) + 1
+                col_start, col_end = int(col_indices.min()), int(col_indices.max()) + 1
+                source_block = np.asarray(source_mask_ds[row_start:row_end, col_start:col_end])
+                native_values = source_block[np.ix_(row_indices - row_start, col_indices - col_start)]
+                if native_values.shape != cog_values.shape:
+                    raise HarmonyJobError("Native source mask window and COG mask window shapes differ after coordinate alignment; comparison stopped.")
+                source_fill = source_mask_ds.attrs.get("_FillValue")
+                native_valid = np.ones(native_values.shape, dtype=bool)
+                if source_fill is not None:
+                    native_valid &= native_values != np.asarray(source_fill).item()
+                comparable = inside & cog_valid & native_valid
+                if not np.issubdtype(cog_values.dtype, np.integer):
+                    rounded_cog = np.rint(cog_values)
+                    comparable &= np.isfinite(cog_values) & (np.abs(cog_values - rounded_cog) < 1e-6) & (rounded_cog >= 0)
+                    cog_int = np.where(np.isfinite(rounded_cog) & (rounded_cog >= 0), rounded_cog, 0).astype(np.uint64)
+                else:
+                    cog_int = cog_values.astype(np.uint64, copy=False)
+                source_uint = native_values.astype(np.uint64, copy=False)
+                matches = comparable & (source_uint == cog_int)
+                mismatches = comparable & (source_uint != cog_int)
+                mismatch_count = int(mismatches.sum())
+                match_count = int(matches.sum())
+                float32_rounding_compatible = 0
+                if mismatch_count:
+                    eligible = mismatches & (source_uint <= np.uint64(0xFFFFFFFF))
+                    rounded_native = np.asarray(source_uint, dtype=np.float32).astype(np.uint64)
+                    float32_rounding_compatible = int((eligible & (rounded_native == cog_int)).sum())
+                pair_counts = _integer_pair_counts(source_uint, cog_int, mismatches)
+                src_dtype = str(source_mask_ds.dtype)
+                return {
+                    "service": "SARGuardian native GUNW source-mask verifier",
+                    "mode": "source-mask-window-compared",
+                    "verified": bool(comparable.sum() > 0),
+                    "comparison_performed": bool(comparable.sum() > 0),
+                    "mask_values_match": bool(mismatch_count == 0 and match_count > 0),
+                    "granule_name": name,
+                    "polarization": pol,
+                    "harmony_mask_job_id": mask_job_id,
+                    "harmony_mask_variable": expected_mask_variable,
+                    "source_collection": short_name,
+                    "native_source_host": "nisar.asf.earthdatacloud.nasa.gov",
+                    "native_source_file_opened": True,
+                    "native_mask_dataset_path": mask_path,
+                    "native_mask_dtype": src_dtype,
+                    "native_mask_shape": [int(source_mask_ds.shape[0]), int(source_mask_ds.shape[1])],
+                    "native_x_coordinates_path": x_path,
+                    "native_y_coordinates_path": y_path,
+                    "native_projection_dataset_path": projection_path,
+                    "native_crs": str(source_crs),
+                    "cog_dtype": str(cog_mask.get("dtype", cog_values.dtype)),
+                    "cog_crs": str(cog_crs),
+                    "grid_alignment": {
+                        "pixel_centres_aligned": True,
+                        "x_coordinate_max_error_m": round(float(np.max(x_errors)) if x_errors.size else 0.0, 6),
+                        "y_coordinate_max_error_m": round(float(np.max(y_errors)) if y_errors.size else 0.0, 6),
+                        "x_alignment_tolerance_m": round(float(x_tolerance), 6),
+                        "y_alignment_tolerance_m": round(float(y_tolerance), 6),
+                    },
+                    "comparison": {
+                        "aoi_window_width_px": int(width),
+                        "aoi_window_height_px": int(height),
+                        "polygon_pixels": int(inside.sum()),
+                        "comparable_pixels": int(comparable.sum()),
+                        "exact_matches": match_count,
+                        "mismatches": mismatch_count,
+                        "exact_match_fraction": round(match_count / max(1, int(comparable.sum())), 6),
+                        "mismatch_pairs_top10": pair_counts,
+                        "mismatches_compatible_with_float32_rounding": float32_rounding_compatible,
+                    },
+                    "full_source_hdf5_downloaded": False,
+                    "aoi_source_window_read_remotely": True,
+                    "persistent_storage_used": False,
+                    "quality_gate_changed": False,
+                    "scientific_displacement_calculated": False,
+                    "interpretation": (
+                        "Native source mask and Harmony COG values match for every comparable AOI pixel; this window shows no mask-value conversion difference."
+                        if mismatch_count == 0 and match_count > 0 else
+                        "Native source and Harmony COG mask values differ at one or more aligned AOI pixels. The mismatch pairs are evidence to investigate the conversion path; they do not by themselves authorize accepting flagged pixels."
+                        if mismatch_count > 0 else
+                        "No valid source/COG pixel pairs were available to compare. Verification is inconclusive."
+                    ),
+                    "next_step": (
+                        "No mask conversion mismatch was found in the compared AOI window. Keep the strict gate and verify the source mask flag semantics / product QA metadata."
+                        if mismatch_count == 0 and match_count > 0 else
+                        "Inspect mismatch_pairs_top10 and the native dataset type. If mismatches are compatible with float32 rounding, trace the Harmony/GDAL conversion before revisiting any gate."
+                        if mismatch_count > 0 else
+                        "Do not change the gate; select a better-aligned valid AOI or inspect source NoData metadata."
+                    ),
+                }
+    except HarmonyJobError:
+        raise
+    except Exception as exc:
+        # Deliberately suppress low-level HTTP/HDF5 details; never echo credentials or signed URLs.
+        raise HarmonyJobError(
+            "Could not safely read the original NISAR HDF5 source mask with authenticated range access. The source mask was NOT verified and the quality gate was NOT changed. Check the Render EARTHDATA_TOKEN, native file access permission, service region, and the new backend dependencies. No full source file was intentionally downloaded or persisted."
+        ) from exc
 
 def _array_stats(values: Any, valid: Any) -> dict[str, Any] | None:
     import numpy as np

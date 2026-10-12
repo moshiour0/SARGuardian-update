@@ -227,6 +227,82 @@ export type GunwQualityAnalysisResponse = {
   detail?: string;
 };
 
+
+export type NativeSourceMaskVerificationResponse = {
+  service: string;
+  mode: string;
+  verified: boolean;
+  comparison_performed: boolean;
+  mask_values_match?: boolean;
+  granule_name: string;
+  polarization: string;
+  harmony_mask_job_id?: string;
+  harmony_mask_variable?: string;
+  source_collection?: string;
+  native_source_host?: string;
+  native_source_file_opened?: boolean;
+  native_mask_dataset_path?: string;
+  native_mask_dtype?: string;
+  native_mask_shape?: number[];
+  native_x_coordinates_path?: string;
+  native_y_coordinates_path?: string;
+  native_projection_dataset_path?: string;
+  native_crs?: string;
+  cog_dtype?: string;
+  cog_crs?: string;
+  grid_alignment?: {
+    pixel_centres_aligned?: boolean;
+    x_coordinate_max_error_m?: number;
+    y_coordinate_max_error_m?: number;
+    x_alignment_tolerance_m?: number;
+    y_alignment_tolerance_m?: number;
+  };
+  comparison?: {
+    aoi_window_width_px?: number;
+    aoi_window_height_px?: number;
+    polygon_pixels?: number;
+    comparable_pixels?: number;
+    exact_matches?: number;
+    mismatches?: number;
+    exact_match_fraction?: number;
+    mismatch_pairs_top10?: Array<{ source_value: number; cog_value: number; count: number }>;
+    mismatches_compatible_with_float32_rounding?: number;
+  };
+  full_source_hdf5_downloaded?: boolean;
+  aoi_source_window_read_remotely?: boolean;
+  persistent_storage_used?: boolean;
+  quality_gate_changed?: boolean;
+  scientific_displacement_calculated?: boolean;
+  interpretation?: string;
+  next_step?: string;
+  message?: string;
+};
+
+export async function verifyGunwNativeSourceMask(input: {
+  granuleName: string;
+  maskJobId: string;
+  coordinates: Coordinate[];
+  maturity?: 'PROVISIONAL' | 'BETA';
+  polarization?: 'HH' | 'VV';
+}): Promise<NativeSourceMaskVerificationResponse> {
+  const response = await fetch(`${API_BASE}/api/harmony/gunw-quality/verify-source-mask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      granule_name: input.granuleName.trim(),
+      mask_job_id: input.maskJobId.trim(),
+      coordinates: input.coordinates,
+      maturity: input.maturity ?? 'PROVISIONAL',
+      polarization: input.polarization ?? 'HH',
+    }),
+  });
+  const payload = await response.json().catch(() => ({})) as NativeSourceMaskVerificationResponse & { detail?: string };
+  if (!response.ok) {
+    throw new Error(payload.detail || payload.message || `Native source-mask verification failed (${response.status}).`);
+  }
+  return payload;
+}
+
 async function readApiPayload<T>(response: Response, fallback: string): Promise<T> {
   const payload = await response.json().catch(() => ({})) as T & { detail?: string; message?: string };
   if (!response.ok) {

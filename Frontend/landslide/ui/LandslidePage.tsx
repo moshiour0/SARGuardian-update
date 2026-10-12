@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { importLibrary, setOptions } from '@googlemaps/js-api-loader';
 import type { User } from 'firebase/auth';
-import { analyzeGunwAoiQuality, getNisarHarmonyJobStatus, inspectNisarAoiWindow, searchNisarCatalog, startGunwQualityLayers } from '../../src/api/catalog';
-import type { AoiWindowResponse, CatalogResponse, GunwQualityAnalysisResponse, HarmonyQualityLayerBundle, NisarProductType } from '../../src/api/catalog';
+import { analyzeGunwAoiQuality, getNisarHarmonyJobStatus, inspectNisarAoiWindow, searchNisarCatalog, startGunwQualityLayers, verifyGunwNativeSourceMask } from '../../src/api/catalog';
+import type { AoiWindowResponse, CatalogResponse, GunwQualityAnalysisResponse, HarmonyQualityLayerBundle, NativeSourceMaskVerificationResponse, NisarProductType } from '../../src/api/catalog';
 import { investigate } from '../engine/adapter';
 import { calculateGeodesicAreaKm2, timestampToRequest, validateAnalysisRequest, validatePolyline } from '../engine/validation';
 import type { AnalysisRequest, Coordinate, InvestigationPolyline, InvestigationResult, LocationSelection, TimestampSelection } from '../engine/types';
@@ -384,6 +384,12 @@ function AoiWindowPanel({
   qualityCheckLoading,
   qualityAnalyzeLoading,
   qualityAnalysis,
+  sourceMaskJobId,
+  onSourceMaskJobIdChange,
+  sourceMaskVerification,
+  sourceMaskVerificationLoading,
+  sourceMaskVerificationError,
+  onVerifySourceMask,
   onStartQualityLayers,
   onCheckQualityLayers,
   onAnalyzeQuality,
@@ -406,6 +412,12 @@ function AoiWindowPanel({
   qualityCheckLoading: boolean;
   qualityAnalyzeLoading: boolean;
   qualityAnalysis: GunwQualityAnalysisResponse | null;
+  sourceMaskJobId: string;
+  onSourceMaskJobIdChange: (value: string) => void;
+  sourceMaskVerification: NativeSourceMaskVerificationResponse | null;
+  sourceMaskVerificationLoading: boolean;
+  sourceMaskVerificationError: string;
+  onVerifySourceMask: () => void;
   onStartQualityLayers: () => void;
   onCheckQualityLayers: () => void;
   onAnalyzeQuality: () => void;
@@ -602,6 +614,45 @@ function AoiWindowPanel({
             <small className="aoi-window-meta">Full TIFF downloaded: no · Persistent raster storage: no · Original HDF5 reader invoked: {qualityAnalysis.original_scientific_engine?.hdf5_read_gunw_invoked ? 'yes' : 'no'}</small>
           </div>
         )}
+        <div className="gate-funnel source-mask-verification-panel">
+          <strong>Verify original NISAR source mask</strong>
+          <p className="catalog-notice">Compare the native integer mask inside the original HDF5 product against the matching Harmony COG pixels using authenticated remote range reads. The full HDF5 file is not intentionally downloaded or saved. This does not relax any quality gate.</p>
+          <label className="aoi-job-label">
+            <span>Successful Harmony mask Job ID</span>
+            <input
+              value={sourceMaskJobId}
+              onChange={(event) => onSourceMaskJobIdChange(event.target.value)}
+              placeholder="Paste the successful mask layer job ID"
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </label>
+          <button type="button" className="investigate-button quality-action-button" disabled={!areaClosed || coordinates.length < 3 || !granuleName.trim() || !sourceMaskJobId.trim() || sourceMaskVerificationLoading} onClick={onVerifySourceMask}>
+            {sourceMaskVerificationLoading ? 'Reading source mask window…' : 'Verify native source mask'}
+          </button>
+          {sourceMaskVerificationError && <p className="catalog-error" role="alert">{sourceMaskVerificationError}</p>}
+          {sourceMaskVerification && (
+            <div className="aoi-window-result" role="status">
+              <strong>{sourceMaskVerification.comparison_performed ? (sourceMaskVerification.mask_values_match ? 'Native source and COG values match' : 'Native source-to-COG comparison completed') : 'Source-mask comparison inconclusive'}</strong>
+              <div className="catalog-stats">
+                <div><span>Source HDF5 opened</span><strong>{sourceMaskVerification.native_source_file_opened ? 'Yes' : 'No'}</strong></div>
+                <div><span>Native dtype</span><strong>{sourceMaskVerification.native_mask_dtype || '—'}</strong></div>
+                <div><span>COG dtype</span><strong>{sourceMaskVerification.cog_dtype || '—'}</strong></div>
+                <div><span>Comparable pixels</span><strong>{sourceMaskVerification.comparison?.comparable_pixels ?? '—'}</strong></div>
+                <div><span>Exact matches</span><strong>{sourceMaskVerification.comparison?.exact_matches ?? '—'}</strong></div>
+                <div><span>Mismatches</span><strong>{sourceMaskVerification.comparison?.mismatches ?? '—'}</strong></div>
+                <div><span>float32-rounding-compatible mismatches</span><strong>{sourceMaskVerification.comparison?.mismatches_compatible_with_float32_rounding ?? '—'}</strong></div>
+              </div>
+              {sourceMaskVerification.native_mask_dataset_path && <small>Native dataset: {sourceMaskVerification.native_mask_dataset_path}</small>}
+              {sourceMaskVerification.comparison?.mismatch_pairs_top10?.length ? (
+                <small>Most common source → COG pairs: {sourceMaskVerification.comparison.mismatch_pairs_top10.map((item) => `${item.source_value} → ${item.cog_value} (${item.count})`).join(', ')}</small>
+              ) : null}
+              <p className="catalog-warning">{sourceMaskVerification.interpretation || sourceMaskVerification.message || 'Comparison did not provide an interpretation.'}</p>
+              {sourceMaskVerification.next_step && <p className="catalog-notice">{sourceMaskVerification.next_step}</p>}
+              <small className="aoi-window-meta">Full HDF5 downloaded: {sourceMaskVerification.full_source_hdf5_downloaded ? 'yes' : 'no'} · Source AOI read remotely: {sourceMaskVerification.aoi_source_window_read_remotely ? 'yes' : 'no'} · Persistent storage: {sourceMaskVerification.persistent_storage_used ? 'used' : 'not used'} · Quality gate changed: {sourceMaskVerification.quality_gate_changed ? 'yes' : 'no'}</small>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -640,6 +691,10 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
   const [isQualityChecking, setIsQualityChecking] = useState(false);
   const [isQualityAnalyzing, setIsQualityAnalyzing] = useState(false);
   const [qualityAnalysis, setQualityAnalysis] = useState<GunwQualityAnalysisResponse | null>(null);
+  const [sourceMaskJobId, setSourceMaskJobId] = useState('');
+  const [isSourceMaskVerifying, setIsSourceMaskVerifying] = useState(false);
+  const [sourceMaskVerificationError, setSourceMaskVerificationError] = useState('');
+  const [sourceMaskVerification, setSourceMaskVerification] = useState<NativeSourceMaskVerificationResponse | null>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
 
   useEffect(() => {
@@ -902,6 +957,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
     setQualityAnalysis(null);
     setQualityBundle(null);
     setQualityStatuses({});
+    setSourceMaskJobId('');
+    setSourceMaskVerification(null);
+    setSourceMaskVerificationError('');
     setIsQualityStarting(true);
     try {
       const response = await startGunwQualityLayers({
@@ -910,6 +968,9 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
         coordinates: [...coordinates, coordinates[0]],
       });
       setQualityBundle(response);
+      setSourceMaskJobId(response.jobs.mask?.job_id || '');
+      setSourceMaskVerification(null);
+      setSourceMaskVerificationError('');
       const initialStatuses = Object.fromEntries(Object.entries(response.jobs).map(([role, job]) => [role, job.status]));
       setQualityStatuses(initialStatuses);
       const errorCount = Object.keys(response.submission_errors || {}).length;
@@ -972,6 +1033,34 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
       setQualityMessage('');
     } finally {
       setIsQualityAnalyzing(false);
+    }
+  };
+
+  const runSourceMaskVerification = async () => {
+    if (!areaClosed || coordinates.length < 3) {
+      setSourceMaskVerificationError('Close the AOI polygon before verifying the native source mask.');
+      return;
+    }
+    if (!qualityGranuleName.trim() || !sourceMaskJobId.trim()) {
+      setSourceMaskVerificationError('Enter the exact GUNW granule name and successful mask job ID.');
+      return;
+    }
+    setSourceMaskVerificationError('');
+    setSourceMaskVerification(null);
+    setIsSourceMaskVerifying(true);
+    try {
+      const response = await verifyGunwNativeSourceMask({
+        granuleName: qualityGranuleName.trim(),
+        maskJobId: sourceMaskJobId.trim(),
+        coordinates: [...coordinates, coordinates[0]],
+        maturity: qualityBundle?.maturity === 'BETA' ? 'BETA' : 'PROVISIONAL',
+        polarization: 'HH',
+      });
+      setSourceMaskVerification(response);
+    } catch (error) {
+      setSourceMaskVerificationError(error instanceof Error ? error.message : 'Could not verify the native GUNW source mask. No quality gate was changed.');
+    } finally {
+      setIsSourceMaskVerifying(false);
     }
   };
 
@@ -1138,13 +1227,13 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                   coordinates={coordinates}
                   areaClosed={areaClosed}
                   jobId={harmonyJobId}
-                  onJobIdChange={(value) => { setHarmonyJobId(value); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); }}
+                  onJobIdChange={(value) => { setHarmonyJobId(value); setAoiWindowResult(null); setAoiWindowError(''); setQualityBundle(null); setQualityStatuses({}); setQualityAnalysis(null); setSourceMaskJobId(''); setSourceMaskVerification(null); setSourceMaskVerificationError(''); setQualityError(''); setQualityMessage(''); }}
                   isLoading={isAoiWindowLoading}
                   error={aoiWindowError}
                   result={aoiWindowResult}
                   onRun={runAoiWindowRead}
                   granuleName={qualityGranuleName}
-                  onGranuleNameChange={(value) => { setQualityGranuleName(value); setQualityBundle(null); setQualityAnalysis(null); setQualityError(''); setQualityMessage(''); }}
+                  onGranuleNameChange={(value) => { setQualityGranuleName(value); setQualityBundle(null); setQualityAnalysis(null); setSourceMaskJobId(''); setSourceMaskVerification(null); setSourceMaskVerificationError(''); setQualityError(''); setQualityMessage(''); }}
                   qualityBundle={qualityBundle}
                   qualityStatuses={qualityStatuses}
                   qualityMessage={qualityMessage}
@@ -1153,6 +1242,12 @@ export function LandslidePage({ user, onHome, onSignOut }: { user: User; onHome:
                   qualityCheckLoading={isQualityChecking}
                   qualityAnalyzeLoading={isQualityAnalyzing}
                   qualityAnalysis={qualityAnalysis}
+                  sourceMaskJobId={sourceMaskJobId}
+                  onSourceMaskJobIdChange={(value) => { setSourceMaskJobId(value); setSourceMaskVerification(null); setSourceMaskVerificationError(''); }}
+                  sourceMaskVerification={sourceMaskVerification}
+                  sourceMaskVerificationLoading={isSourceMaskVerifying}
+                  sourceMaskVerificationError={sourceMaskVerificationError}
+                  onVerifySourceMask={runSourceMaskVerification}
                   onStartQualityLayers={startQualityLayers}
                   onCheckQualityLayers={checkQualityLayers}
                   onAnalyzeQuality={runQualityAnalysis}
